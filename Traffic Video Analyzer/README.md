@@ -97,7 +97,7 @@ To clear all previous analysis records:
 ## 9. Contact
 
 For any issues or if model files are missing, contact the project author. 
-email : 1221302656@student.mmu.edu.my
+email : jameskoh0513@gmail.com
 
 ---
 
