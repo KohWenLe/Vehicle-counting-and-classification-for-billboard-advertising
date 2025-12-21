@@ -155,7 +155,7 @@ def analyze_with_gpt(counts, time_series):
     from dotenv import load_dotenv
     load_dotenv()
 
-    api_key = os.getenv("OPENAI_API_KEY", "sk-demo-placeholder")
+    api_key = os.getenv("OPENAI_API_KEY", "sk-sample")
     client = openai.OpenAI(api_key=api_key)
 
     prompt = (
