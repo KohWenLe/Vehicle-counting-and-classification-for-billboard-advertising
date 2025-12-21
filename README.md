@@ -75,26 +75,6 @@ SQLite Database (Analysis History)
 
 ---
 
-## 📂 Project Structure
-
-```
-project-root/
-├── app.py                     # Flask backend
-├── pipeline.py                # Video processing pipeline
-├── analysis.py                # Local analysis logic
-├── requirements.txt
-├── .env.sample               # Environment variable template
-├── yolo11n.pt                 # YOLO model (not included)
-├── mobilenetv3_original.keras # Classifier model (not included)
-├── analysis_history.db        # Auto-generated database
-├── frontend/
-│   ├── App.vue
-│   ├── main.js
-│   └── ...
-```
-
----
-
 ## ⚙️ Prerequisites
 
 * Python **3.8+**
