@@ -1,11 +1,7 @@
 .env
-
 venv/
-
 uploads/
-
 instance/
 *.db
-
 __pycache__/
 *.pyc
