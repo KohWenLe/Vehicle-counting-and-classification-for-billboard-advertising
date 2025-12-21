@@ -83,6 +83,19 @@ SQLite Database (Analysis History)
 
 ---
 
+## To start off 
+Open command prompt and go to the project root (Traffic Video Analyzer)
+```
+cd <path/to/Traffic Video Analyzer>
+```
+
+(Recommended/optional) Create a virtual environment:
+```
+python -m venv venv
+# Activate (Windows): venv\Scripts\activate
+# Activate (Linux/Mac): source venv/bin/activate
+```
+
 ## 🔧 Backend Setup (Flask)
 
 ### 1️⃣ Install Dependencies
@@ -117,8 +130,9 @@ http://localhost:5000
 
 ## 🎨 Frontend Setup (Vue.js)
 
+Open another command prompt, go to the Traffic Video Analyzer directory again, enter:
 ```bash
-cd frontend
+cd vehicle-webapp
 npm install
 npm run serve
 ```
@@ -184,12 +198,36 @@ python app.py
 
 ---
 
-## 🎓 Academic Context
+---
 
-* **Domain:** Computer Vision, AI, Data Analytics
-* **Application:** Traffic Analysis for Billboard Advertising 
-* **Tech Stack:**
-  Python · Flask · Vue.js · YOLO · DeepSORT · TensorFlow · GPT
+## Research & Model Development Notebooks
+
+The project root includes a folder that contains several Jupyter Notebook (`.ipynb`) files used **during the research and model development phase** of this project. These notebooks are **not required to run the final system**, but are included for academic transparency and evaluation.
+
+### Included Notebooks
+
+- **scrapeImages.ipynb**  
+  Used to collect and preprocess vehicle images from online sources for dataset creation.
+
+- **YOLO classification and crop.ipynb**  
+  Used to experiment with YOLO-based vehicle detection and cropping detected vehicles for downstream classification.
+
+- **MobileNetV3 training original.ipynb**  
+  Used to train the MobileNetV3 model for vehicle class classification (High-End, Mid-Range, Low-End, Commercial, Motorcycle).
+
+- **Vehicle counting and classification.ipynb**  
+  Early prototype notebook for testing vehicle counting, tracking logic, and class aggregation before integrating into the production pipeline.
+
+### Important Notes
+
+- These notebooks were used **offline** during experimentation and model training.
+- They are **not executed by the Flask application**.
+- Running the system **does NOT require Jupyter Notebook**.
+
+They are provided for:
+- Academic review
+- Reproducibility of model training
+- Demonstration of research methodology
 
 ---
 
