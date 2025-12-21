@@ -1,8 +1,7 @@
 .env
-*.pyc
-*.db
 venv/
 uploads/
 instance/
+*.db
 __pycache__/
 *.pyc
