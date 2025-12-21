@@ -5,3 +5,4 @@ venv/
 uploads/
 instance/
 __pycache__/
+*.pyc
