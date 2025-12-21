@@ -1,26 +1,7 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-
-# Virtual environments
-venv/
 .env
-
-# Flask
+venv/
+uploads/
 instance/
 *.db
-
-# Uploads & outputs
-uploads/
-output/
-
-# Node / frontend
-node_modules/
-dist/
-
-# OS
-.DS_Store
-Thumbs.db
+__pycache__/
+*.pyc
