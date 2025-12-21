@@ -4,26 +4,15 @@ This tool analyzes traffic video or camera streams for billboard advertisers, pr
 
 ---
 
-## 1. Download Project Files
+## 1. Project Directories
+Open command prompt and go to the project root (Traffic Video Analyzer)
+```
+cd <path/to/Traffic Video Analyzer>
+```
 
-- Unzip this project folder.
+## 2. Backend Setup
 
----
-
-## 2. Model Files
-
-Place these files in the project root (same folder as app.py):
-
-- yolo11n.pt
-- mobilenetv3\_original.keras
-
-If missing, contact author.
-
----
-
-## 3. Backend Setup
-
-1. (Recommended) Create a virtual environment:
+1. (Recommended/optional) Create a virtual environment:
    ```
    python -m venv venv
    # Activate (Windows): venv\Scripts\activate
@@ -39,11 +28,11 @@ If missing, contact author.
 
 ---
 
-## 4. Frontend Setup
+## 3. Frontend Setup
 
-1. In the frontend folder:
+1. In the vehicle-webapp folder:
    ```
-   cd frontend
+   cd vehicle-webapp
    npm install
    ```
 2. Run the frontend:
@@ -54,9 +43,9 @@ If missing, contact author.
 
 ---
 
-## 5. Run the Backend
+## 4. Run the Backend
 
-In the project root:
+Open another command prompt, go to the Traffic Video Analyzer directory again, enter:
 
 ```
 python app.py
@@ -66,7 +55,7 @@ python app.py
 
 ---
 
-## 6. Usage Steps
+## 5. Usage Steps
 
 1. Open [http://localhost:8080](http://localhost:8080) in your browser.
 2. Upload a video or enter a camera/IP stream URL.
@@ -76,7 +65,7 @@ python app.py
 
 ---
 
-## 7. Resetting the Database
+## 6. Resetting the Database
 
 To clear all previous analysis records:
 
@@ -86,7 +75,7 @@ To clear all previous analysis records:
 
 ---
 
-## 8. Important Notes
+## 7. Important Notes
 
 - Model files **must** be present or video analysis will fail.
 - OpenAI GPT is optional; local recommendations are always available.
@@ -94,7 +83,7 @@ To clear all previous analysis records:
 
 ---
 
-## 9. Contact
+## 8. Contact
 
 For any issues or if model files are missing, contact the project author. 
 email : jameskoh0513@gmail.com
