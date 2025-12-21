@@ -232,7 +232,7 @@ They are provided for:
 ---
 
 ## 📬 Contact
-
 For questions, missing assets, or clarification, please contact the project author.
 jameskoh0513@gmail.com
+
 ---
