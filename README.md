@@ -86,9 +86,9 @@ SQLite Database (Analysis History)
 <img width="670" height="500" alt="vehicle tracking" src="https://github.com/user-attachments/assets/12e705be-9ac4-41df-91a2-2e3f78e006f6" />
 
 
-- Video Upload
+- Webpage (video upload)
 
-<img width="770" height="400" alt="video-upload-feature" src="https://github.com/user-attachments/assets/856b8134-25ea-4006-91eb-6f0fd07a5a48" />
+<img width="770" height="400" alt="video-upload-UI" src="https://github.com/user-attachments/assets/d107ffed-548c-4f31-9f2e-94b09f764117" />
 
 
 - Analysis Generated
