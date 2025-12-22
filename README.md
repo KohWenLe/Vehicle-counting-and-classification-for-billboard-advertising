@@ -83,17 +83,17 @@ SQLite Database (Analysis History)
 
 - Counting and Classification Process
 
-<img width="1440" height="1069" alt="vehicle tracking" src="https://github.com/user-attachments/assets/12e705be-9ac4-41df-91a2-2e3f78e006f6" />
+<img width="804" height="600" alt="vehicle tracking" src="https://github.com/user-attachments/assets/12e705be-9ac4-41df-91a2-2e3f78e006f6" />
 
 
 - Video Upload
 
-<img width="418" height="217" alt="video-upload-feature" src="https://github.com/user-attachments/assets/856b8134-25ea-4006-91eb-6f0fd07a5a48" />
+<img width="963" height="500" alt="video-upload-feature" src="https://github.com/user-attachments/assets/856b8134-25ea-4006-91eb-6f0fd07a5a48" />
 
 
 - Analysis Generated
 
-<img width="1131" height="1131" alt="pie-chart" src="https://github.com/user-attachments/assets/fd47505a-00ed-498a-aa95-38fb99f5e98f" />
+<img width="500" height="500" alt="pie-chart" src="https://github.com/user-attachments/assets/fd47505a-00ed-498a-aa95-38fb99f5e98f" />
 <img width="1131" height="565" alt="time-series-chart" src="https://github.com/user-attachments/assets/c7a0e6e2-cca7-4abd-8858-1052d809b191" />
 <img width="1087" height="137" alt="recommendations generated" src="https://github.com/user-attachments/assets/3778f02a-79ba-4986-871a-d5d771f35949" />
 
