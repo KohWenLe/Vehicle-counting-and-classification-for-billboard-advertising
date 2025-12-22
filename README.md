@@ -75,7 +75,7 @@ SQLite Database (Analysis History)
 
 ### System Flowchart and Video Processing Pipeline
 
-<img width="490" height="265" alt="System Flowchart" src="https://github.com/user-attachments/assets/7043a86c-9358-42b6-a84d-717f44e13c76" />
+<img width="554" height="300" alt="flowc" src="https://github.com/user-attachments/assets/81cd0d43-8a0b-44c9-99dd-86e980e3ceb7" />
 
 ---
 
