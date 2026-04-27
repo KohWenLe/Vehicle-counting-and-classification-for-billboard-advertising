@@ -6,6 +6,33 @@ import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as keras_preprocess
 from tensorflow.keras.preprocessing.image import img_to_array
 
+def load_classifier_with_architecture(classifier_path):
+    """Load classifier by rebuilding architecture then loading weights"""
+    from tensorflow.keras.applications import MobileNetV3Small
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
+    from tensorflow.keras.regularizers import l2
+    
+    # Rebuild the exact architecture from your training
+    base_model = MobileNetV3Small(
+        input_shape=(224, 224, 3),
+        include_top=False,
+        weights=None  # Don't load ImageNet weights
+    )
+    
+    model = Sequential([
+        base_model,
+        GlobalAveragePooling2D(),
+        Dense(256, activation='relu', kernel_regularizer=l2(0.001)),
+        Dropout(0.4),
+        Dense(5, activation='softmax')  # 5 classes
+    ])
+    
+    # Load only the weights
+    model.load_weights(classifier_path)
+    
+    return model
+
 def process_video(
     video_path,
     start_dt=None,
@@ -40,7 +67,24 @@ def process_video(
 
     # Load models
     yolo_model = YOLO(model_path)
-    classifier_model = tf.keras.models.load_model(classifier_path)
+    # Add detailed error handling
+    try:
+        print(f"Loading classifier from: {classifier_path}")
+        print(f"TensorFlow version: {tf.__version__}")
+        
+        # Try loading weights only approach
+        classifier_model = load_classifier_with_architecture(classifier_path)
+        
+    except Exception as e:
+        print(f"Failed to load classifier: {e}")
+        print("Attempting alternative loading method...")
+        
+        # Fallback: load with safe_mode=False
+        classifier_model = tf.keras.models.load_model(
+            classifier_path,
+            compile=False,
+            safe_mode=False
+        )
 
     import datetime
     if start_dt is None:

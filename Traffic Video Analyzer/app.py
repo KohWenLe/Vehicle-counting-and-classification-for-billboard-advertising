@@ -1,6 +1,7 @@
 # pip install flask
 from flask import Flask, request, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
+from flask_cors import CORS 
 import os
 import uuid
 import traceback
@@ -8,6 +9,7 @@ import datetime
 import json
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///analysis_history.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
