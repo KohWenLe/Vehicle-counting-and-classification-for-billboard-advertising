@@ -10,6 +10,9 @@ Open command prompt and go to the project root (Traffic Video Analyzer)
 cd <path/to/Traffic Video Analyzer>
 ```
 
+Backend code is now organized under the `backend/` folder, while `app.py`, `worker.py`, `analysis.py`, and `pipeline.py` remain thin compatibility entrypoints.
+The heavy inference code lives in `backend/inference/`.
+
 ## 2. Backend Setup
 
 1. (Recommended/optional) Create a virtual environment:
@@ -53,6 +56,52 @@ python app.py
 
 - Backend API at [http://localhost:5000](http://localhost:5000)
 
+## 4b. Run the Analysis Worker
+
+Open one more command prompt, go to the Traffic Video Analyzer directory again, enter:
+
+```
+python worker.py
+```
+
+- This worker picks up queued analysis jobs from the database and processes them in the background.
+- If the worker is not running, uploaded jobs will remain in `queued` status.
+- The worker also runs periodic maintenance, including automatic pruning of old finished jobs and annotated output files.
+
+---
+
+## 4c. Backend Ops Endpoints
+
+These endpoints help you monitor and operate the async analysis queue:
+
+- `GET /health` returns app health, database status, and a queue snapshot.
+- `GET /analysis-jobs?status=queued&limit=20` lists recent jobs with optional status filtering.
+- `GET /analysis-jobs/stats` returns queue depth, status counts, stale leases, and active worker count.
+- `GET /metrics` returns Prometheus-style metrics for queue depth, worker activity, history totals, and database availability.
+- `POST /analysis-jobs/<job_id>/retry` re-queues a failed or canceled job for another attempt.
+- `POST /analysis-jobs/<job_id>/cancel` requests cancellation for a queued or running job.
+- `POST /analysis-jobs/prune` removes old completed/failed/canceled jobs and annotated video files based on retention.
+- Backend and worker lifecycle events are emitted as structured JSON log lines to standard logging output.
+- Error responses now include both `error` and a machine-friendly `error_code`.
+
+---
+
+## 4d. Useful Backend Environment Variables
+
+- `TVA_MAX_UPLOAD_BYTES`: maximum upload size in bytes. Default is `536870912` (512 MB).
+- `TVA_ALLOWED_VIDEO_EXTENSIONS`: comma-separated allowed upload extensions. Default is `mp4,mov,avi,mkv,webm,m4v,mpeg,mpg`.
+- `TVA_ALLOWED_CAMERA_SCHEMES`: allowed camera URL schemes. Default is `rtsp,rtsps,http,https`.
+- `TVA_JOB_TIMEOUT_SECONDS`: maximum worker processing time before a job is treated as timed out. Default is `7200`.
+- `TVA_MAINTENANCE_INTERVAL_SECONDS`: how often the worker runs automatic pruning. Default is `300`.
+- `TVA_JOB_RETENTION_HOURS`: how long completed/failed/canceled jobs and annotated outputs are kept before pruning. Default is `168`.
+- `TVA_PIPELINE_RESIZE_DIM`: processing resolution as `width,height` or `widthxheight`. Default is `512,384`.
+- `TVA_PIPELINE_DETECTION_INTERVAL`: run YOLO every Nth frame instead of every frame. Default is `2`.
+- `TVA_PIPELINE_PROGRESS_REPORT_FRAMES`: how many processed frames between pipeline progress reports. Default is `45`.
+- `TVA_PIPELINE_TRACKER_BACKEND`: tracker backend for the pipeline. Default is `centroid`. The heavier alternative is `deepsort`.
+- `TVA_PROGRESS_SAVE_INTERVAL_SECONDS`: minimum seconds between worker progress writes to the database. Default is `2`.
+- `TVA_PROGRESS_SAVE_PERCENT_STEP`: minimum progress-percent jump before forcing a worker progress write. Default is `5`.
+- `TVA_ENABLE_TEST_ROUTES`: set to `true` only in development if you need the debug/test routes.
+
 ---
 
 ## 5. Usage Steps
@@ -79,6 +128,13 @@ To clear all previous analysis records:
 
 - Model files **must** be present or video analysis will fail.
 - OpenAI GPT is optional; local recommendations are always available.
+- Uploads are now validated by extension and size before entering the analysis queue.
+- Camera stream sources must be an integer device index or a direct `rtsp`, `rtsps`, `http`, or `https` stream URL.
+- YouTube page URLs such as `youtube.com/watch?...` or `youtu.be/...` are not supported input sources.
+- The default pipeline is now tuned more for speed: lower processing resolution, detection every 2 frames, reduced worker progress-write frequency, and the lighter `centroid` tracker by default.
+- You can compare tracker backends with `py benchmark_trackers.py --video <path-to-video>` or run a quick synthetic-only comparison with `py benchmark_trackers.py`.
+- `GET /analysis-jobs` now supports `status`, `source_kind`, `analysis_name`, `limit`, and `offset`.
+- `GET /history` still returns a simple array by default for compatibility, but returns a paginated object when query parameters such as `analysis_name`, `limit`, or `offset` are used.
 - All required dependencies are listed in requirements.txt and package.json.
 
 ---
