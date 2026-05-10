@@ -10,6 +10,7 @@ import tensorflow as tf
 from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as keras_preprocess
 from tensorflow.keras.preprocessing.image import img_to_array
 from ultralytics import YOLO
+from backend.inference.classification_voting import TrackClassificationVotes
 from backend.inference.trackers import build_tracker_backend
 
 
@@ -127,6 +128,7 @@ def process_video(
     time_series_interval_seconds=5,
     progress_report_frames=45,
     tracker_backend="deepsort",
+    classification_vote_samples=3,
     progress_callback=None,
     should_cancel=None,
 ):
@@ -153,6 +155,7 @@ def process_video(
     width, height = resize_dim
     detection_interval = max(1, int(detection_interval or 1))
     progress_report_frames = max(1, int(progress_report_frames or 1))
+    classification_vote_samples = max(1, int(classification_vote_samples or 1))
     should_draw_annotations = bool(display or save_annotated)
 
     if roi_points is None:
@@ -177,10 +180,26 @@ def process_video(
         out_writer = None
 
     tracker = build_tracker_backend(tracker_backend, embedder_gpu=_has_gpu())
+    classification_votes = TrackClassificationVotes(
+        custom_classes=custom_classes,
+        threshold=classification_threshold,
+        required_samples=classification_vote_samples,
+    )
     track_classes = {}
     track_memory = {}
     class_counts = {name: 0 for name in custom_classes}
     class_counts["Unclassified"] = 0
+
+    def commit_track_classification(track_id):
+        mem = track_memory.get(track_id, {"inside_roi": False, "counted": False})
+        if mem.get("counted"):
+            return track_classes.get(track_id, "Unclassified")
+
+        cls_label = classification_votes.final_label(track_id)
+        track_classes[track_id] = cls_label
+        class_counts[cls_label] += 1
+        track_memory[track_id] = {**mem, "counted": True}
+        return cls_label
 
     time_series = []
     detection_classes = list(yolo_class_names.keys())
@@ -260,7 +279,10 @@ def process_video(
             counted = mem["counted"]
             now_inside = cv2.pointPolygonTest(roi_polygon, (cx, cy), False) >= 0
 
-            if not was_inside and now_inside and not counted:
+            if now_inside and not counted:
+                mem["classification_started"] = True
+
+            if now_inside and not counted and frame_idx % detection_interval == 0:
                 crop = frame_resized[y1:y2, x1:x2]
                 if crop.shape[0] >= min_h and crop.shape[1] >= min_w:
                     rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
@@ -269,22 +291,20 @@ def process_video(
                     arr = keras_preprocess(arr)
                     arr = np.expand_dims(arr, axis=0)
                     probs = classifier_model.predict(arr, verbose=0)
-                    label_index = int(np.argmax(probs))
-                    label_confidence = float(np.max(probs))
-                    if label_confidence >= classification_threshold:
-                        cls_label = custom_classes[label_index]
-                    else:
-                        cls_label = "Unclassified"
-                else:
-                    cls_label = "Unclassified"
+                    classification_votes.add_sample(track_id, probs[0])
 
-                track_classes[track_id] = cls_label
-                class_counts[cls_label] += 1
+                if classification_votes.is_ready(track_id):
+                    cls_label = commit_track_classification(track_id)
+                    counted = True
+                else:
+                    cls_label = track_classes.get(track_id, "Pending")
+            elif was_inside and not now_inside and not counted and mem.get("classification_started"):
+                cls_label = commit_track_classification(track_id)
                 counted = True
             else:
-                cls_label = track_classes.get(track_id, "Unclassified")
+                cls_label = track_classes.get(track_id, "Pending" if now_inside and not counted else "Unclassified")
 
-            track_memory[track_id] = {"inside_roi": now_inside, "counted": counted}
+            track_memory[track_id] = {**mem, "inside_roi": now_inside, "counted": counted}
 
             if should_draw_annotations:
                 color = (0, 255, 0)
@@ -333,8 +353,14 @@ def process_video(
     if out_writer:
         out_writer.release()
 
-    if final_snapshot and (not time_series or time_series[-1] != final_snapshot):
-        time_series.append(final_snapshot)
+    for track_id, mem in list(track_memory.items()):
+        if not mem.get("counted") and mem.get("classification_started"):
+            commit_track_classification(track_id)
+
+    if final_snapshot:
+        final_snapshot = {**final_snapshot, **class_counts.copy()}
+        if not time_series or time_series[-1] != final_snapshot:
+            time_series.append(final_snapshot)
 
     if progress_callback:
         progress_callback(99, "Finalizing analysis results...")

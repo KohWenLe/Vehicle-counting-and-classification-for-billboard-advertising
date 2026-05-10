@@ -4,6 +4,7 @@ import os
 
 from backend.core import (
     DEFAULT_JOB_RETENTION_HOURS,
+    DEFAULT_PIPELINE_CLASSIFICATION_VOTE_SAMPLES,
     DEFAULT_PIPELINE_DETECTION_INTERVAL,
     DEFAULT_PIPELINE_PROGRESS_REPORT_FRAMES,
     DEFAULT_PIPELINE_RESIZE_DIM,
@@ -28,6 +29,7 @@ def run_video_pipeline(video_path, start_dt, save_annotated, analysis_name, prog
         detection_interval=DEFAULT_PIPELINE_DETECTION_INTERVAL,
         progress_report_frames=DEFAULT_PIPELINE_PROGRESS_REPORT_FRAMES,
         tracker_backend=DEFAULT_PIPELINE_TRACKER_BACKEND,
+        classification_vote_samples=DEFAULT_PIPELINE_CLASSIFICATION_VOTE_SAMPLES,
         save_annotated=save_annotated,
         analysis_name=analysis_name,
         output_dir=OUTPUT_FOLDER,

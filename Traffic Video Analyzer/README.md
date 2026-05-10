@@ -98,6 +98,7 @@ These endpoints help you monitor and operate the async analysis queue:
 - `TVA_PIPELINE_DETECTION_INTERVAL`: run YOLO every Nth frame instead of every frame. Default is `2`.
 - `TVA_PIPELINE_PROGRESS_REPORT_FRAMES`: how many processed frames between pipeline progress reports. Default is `45`.
 - `TVA_PIPELINE_TRACKER_BACKEND`: tracker backend for the pipeline. Default is `centroid`. The heavier alternative is `deepsort`.
+- `TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES`: number of classifier samples to average before committing a track's vehicle class. Default is `3`; use `1` for the old one-shot behavior.
 - `TVA_PROGRESS_SAVE_INTERVAL_SECONDS`: minimum seconds between worker progress writes to the database. Default is `2`.
 - `TVA_PROGRESS_SAVE_PERCENT_STEP`: minimum progress-percent jump before forcing a worker progress write. Default is `5`.
 - `TVA_ENABLE_TEST_ROUTES`: set to `true` only in development if you need the debug/test routes.
