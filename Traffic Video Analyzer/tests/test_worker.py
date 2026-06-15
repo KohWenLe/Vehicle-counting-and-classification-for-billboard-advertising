@@ -95,6 +95,7 @@ class WorkerTests(unittest.TestCase):
                 job_id="job-a",
                 status="queued",
                 analysis_name="first",
+                correlation_id="trace-job-a",
                 input_path="camera-1",
                 source_kind="camera_url",
                 save_annotated=False,
@@ -130,6 +131,9 @@ class WorkerTests(unittest.TestCase):
         logged_messages = [call.args[0] for call in info_log.call_args_list]
         self.assertTrue(any('"event":"analysis_job_claimed"' in message for message in logged_messages))
         self.assertTrue(any('"event":"analysis_job_completed"' in message for message in logged_messages))
+        completion_logs = [message for message in logged_messages if '"event":"analysis_job_completed"' in message]
+        self.assertIn('"correlation_id":"trace-job-a"', completion_logs[0])
+        self.assertIn('"processing_seconds"', completion_logs[0])
 
         with self.app_module.app.app_context():
             completed = self.app_module.db.session.get(self.app_module.AnalysisJob, "job-a")
@@ -310,6 +314,17 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(second_run)
         self.assertEqual(prune_jobs.call_count, 1)
 
+    def test_log_worker_startup_emits_diagnostics_summary(self):
+        with mock.patch.object(self.worker_module.app.logger, "info") as info_log:
+            self.worker_module.log_worker_startup(worker_id="worker-startup")
+
+        logged_messages = [call.args[0] for call in info_log.call_args_list]
+        startup_logs = [message for message in logged_messages if '"event":"worker_startup"' in message]
+        self.assertEqual(len(startup_logs), 1)
+        self.assertIn('"worker_id":"worker-startup"', startup_logs[0])
+        self.assertIn('"diagnostics_status"', startup_logs[0])
+        self.assertIn('"pipeline_tracker_backend"', startup_logs[0])
+
     def test_worker_module_keeps_expected_public_surface_after_refactor(self):
         expected_names = [
             "get_worker_id",
@@ -319,6 +334,7 @@ class WorkerTests(unittest.TestCase):
             "process_next_job",
             "run_worker_loop",
             "maybe_run_maintenance",
+            "log_worker_startup",
             "prune_terminal_jobs",
             "execute_analysis",
             "AnalysisJob",

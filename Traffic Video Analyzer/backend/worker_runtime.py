@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from backend.core import _utcnow, app, db
 from backend.models import AnalysisJob
-from backend.observability import log_event
+from backend.observability import diagnostics_snapshot, log_event
 from backend.services import (
     _cleanup_uploaded_file,
     _job_video_source,
@@ -48,6 +48,14 @@ def _job_timed_out(job, now=None):
     return (now - started_at).total_seconds() > JOB_TIMEOUT_SECONDS
 
 
+def _duration_seconds(start, end):
+    start = _as_utc(start)
+    end = _as_utc(end)
+    if not start or not end:
+        return None
+    return max(0.0, (end - start).total_seconds())
+
+
 def maybe_run_maintenance(now=None, force=False):
     global _last_maintenance_at
 
@@ -67,6 +75,33 @@ def maybe_run_maintenance(now=None, force=False):
         retention_hours=result.get("retention_hours"),
     )
     return True
+
+
+def log_worker_startup(worker_id=None):
+    worker_id = worker_id or get_worker_id()
+    with app.app_context():
+        diagnostics = diagnostics_snapshot()
+    path_statuses = {
+        name: {
+            "exists": payload.get("exists"),
+            "writable": payload.get("writable"),
+            "disk_status": payload.get("disk_status"),
+        }
+        for name, payload in diagnostics.get("paths", {}).items()
+    }
+    model_statuses = {
+        name: payload.get("exists")
+        for name, payload in diagnostics.get("models", {}).items()
+    }
+    log_event(
+        "worker_startup",
+        worker_id=worker_id,
+        diagnostics_status=diagnostics.get("status"),
+        pipeline_tracker_backend=diagnostics.get("configuration", {}).get("pipeline_tracker_backend"),
+        path_statuses=path_statuses,
+        model_statuses=model_statuses,
+    )
+    return diagnostics
 
 
 def recover_abandoned_jobs(worker_id=None):
@@ -235,8 +270,10 @@ def claim_next_job(worker_id=None):
                 log_event(
                     "analysis_job_claimed",
                     job_id=claimed_job.job_id,
+                    correlation_id=claimed_job.correlation_id,
                     worker_id=worker_id,
                     reclaimed=(candidate.status != "queued"),
+                    queue_wait_seconds=_duration_seconds(claimed_job.created_at, claimed_job.started_at),
                 )
                 return SimpleNamespace(job_id=claimed_job.job_id, worker_id=worker_id)
 
@@ -266,16 +303,20 @@ def process_job(job_id, worker_id=None):
             job.progress_message = "Analysis completed."
             job.result_json = json.dumps(result)
             job.error = None
-            job.updated_at = _utcnow()
-            job.completed_at = _utcnow()
-            job.heartbeat_at = _utcnow()
+            completed_at = _utcnow()
+            job.updated_at = completed_at
+            job.completed_at = completed_at
+            job.heartbeat_at = completed_at
             job.lease_expires_at = _lease_deadline()
             db.session.commit()
             log_event(
                 "analysis_job_completed",
                 job_id=job_id,
+                correlation_id=job.correlation_id,
                 worker_id=worker_id,
                 progress_percent=job.progress_percent,
+                queue_wait_seconds=_duration_seconds(job.created_at, job.started_at),
+                processing_seconds=_duration_seconds(job.started_at, job.completed_at),
             )
         except Exception as exc:
             job = db.session.get(AnalysisJob, job_id)
@@ -303,8 +344,11 @@ def process_job(job_id, worker_id=None):
                 "analysis_job_failed" if job.status == "failed" else "analysis_job_canceled",
                 level="error" if job.status == "failed" else "warning",
                 job_id=job_id,
+                correlation_id=job.correlation_id,
                 worker_id=worker_id,
                 error=job.error,
+                queue_wait_seconds=_duration_seconds(job.created_at, job.started_at),
+                processing_seconds=_duration_seconds(job.started_at, job.completed_at),
             )
         finally:
             job = db.session.get(AnalysisJob, job_id)
@@ -324,6 +368,7 @@ def process_next_job(worker_id=None):
 
 def run_worker_loop(poll_interval_seconds=2, worker_id=None):
     worker_id = worker_id or get_worker_id()
+    log_worker_startup(worker_id=worker_id)
     maybe_run_maintenance(force=True)
     recover_abandoned_jobs(worker_id=worker_id)
     while True:

@@ -4,7 +4,7 @@ import os
 import uuid
 from urllib.parse import urlparse
 
-from flask import Response, jsonify, request, send_from_directory
+from flask import Response, g, jsonify, request, send_from_directory
 from sqlalchemy import text
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
@@ -23,7 +23,14 @@ from backend.core import (
     db,
 )
 from backend.models import AnalysisJob, AnalysisResult
-from backend.observability import _job_stats_snapshot, _metrics_snapshot, _prometheus_metrics_text, log_event
+from backend.observability import (
+    _failure_reason,
+    _job_stats_snapshot,
+    _metrics_snapshot,
+    _prometheus_metrics_text,
+    diagnostics_snapshot,
+    log_event,
+)
 from backend.services import (
     _cleanup_uploaded_file,
     _job_video_source,
@@ -64,9 +71,32 @@ def _error_response(message, code, status_code, details=None):
     return jsonify(payload), status_code
 
 
+def _normalize_correlation_id(value):
+    value = (value or "").strip()
+    if not value:
+        return uuid.uuid4().hex
+    return value[:128]
+
+
+def _current_correlation_id():
+    return getattr(g, "correlation_id", None) or _normalize_correlation_id(None)
+
+
+@app.before_request
+def attach_correlation_id():
+    g.correlation_id = _normalize_correlation_id(request.headers.get("X-Correlation-ID"))
+
+
+@app.after_request
+def add_correlation_id_header(response):
+    response.headers.setdefault("X-Correlation-ID", _current_correlation_id())
+    return response
+
+
 def _serialize_job(job):
     payload = {
         "job_id": job.job_id,
+        "correlation_id": job.correlation_id,
         "status": job.status,
         "analysis_name": job.analysis_name,
         "source_kind": job.source_kind,
@@ -74,6 +104,8 @@ def _serialize_job(job):
         "progress_percent": job.progress_percent,
         "progress_message": job.progress_message,
         "worker_id": job.worker_id,
+        "retry_count": int(job.retry_count or 0),
+        "last_retried_at": _to_iso(job.last_retried_at),
         "created_at": _to_iso(job.created_at),
         "updated_at": _to_iso(job.updated_at),
         "started_at": _to_iso(job.started_at),
@@ -204,6 +236,8 @@ def _reset_job_for_retry(job):
     job.progress_message = "Queued for retry."
     job.error = None
     job.result_json = None
+    job.retry_count = int(job.retry_count or 0) + 1
+    job.last_retried_at = now
     job.worker_id = None
     job.heartbeat_at = None
     job.lease_expires_at = None
@@ -252,6 +286,7 @@ def create_analysis_job():
         created_at = _utcnow()
         job = AnalysisJob(
             job_id=uuid.uuid4().hex,
+            correlation_id=_current_correlation_id(),
             status="queued",
             analysis_name=prepared["analysis_name"],
             input_path=str(prepared["video_path"]),
@@ -262,6 +297,8 @@ def create_analysis_job():
             progress_message="Queued for analysis.",
             error=None,
             result_json=None,
+            retry_count=0,
+            last_retried_at=None,
             worker_id=None,
             heartbeat_at=None,
             lease_expires_at=None,
@@ -275,6 +312,7 @@ def create_analysis_job():
         log_event(
             "analysis_job_created",
             job_id=job.job_id,
+            correlation_id=job.correlation_id,
             status=job.status,
             source_kind=job.source_kind,
             save_annotated=job.save_annotated,
@@ -315,6 +353,98 @@ def list_analysis_jobs():
         )
     except ApiError as exc:
         return _error_response(exc.message, exc.code, exc.status_code, exc.details)
+
+
+@app.route("/analysis-jobs/failures", methods=["GET"])
+def list_recent_failures():
+    try:
+        limit = _parse_limit(request.args.get("limit"), default=10)
+        offset = _parse_offset(request.args.get("offset"))
+    except ApiError as exc:
+        return _error_response(exc.message, exc.code, exc.status_code, exc.details)
+
+    query = AnalysisJob.query.filter(AnalysisJob.status == "failed").order_by(
+        AnalysisJob.completed_at.desc(),
+        AnalysisJob.updated_at.desc(),
+    )
+    total = query.count()
+    failures = query.offset(offset).limit(limit).all()
+    return jsonify(
+        {
+            "failures": [
+                {
+                    **_serialize_job(job),
+                    "failure_reason": _failure_reason(job.error),
+                }
+                for job in failures
+            ],
+            "limit": limit,
+            "offset": offset,
+            "count": len(failures),
+            "total": total,
+        }
+    )
+
+
+@app.route("/analysis-jobs/workers", methods=["GET"])
+def list_active_workers():
+    now = _utcnow()
+    now_naive = now.replace(tzinfo=None)
+    jobs = (
+        AnalysisJob.query.filter(
+            AnalysisJob.status.in_(["running", "canceling"]),
+            AnalysisJob.worker_id.is_not(None),
+        )
+        .order_by(AnalysisJob.worker_id.asc(), AnalysisJob.updated_at.desc())
+        .all()
+    )
+    workers = {}
+    for job in jobs:
+        worker = workers.setdefault(
+            job.worker_id,
+            {
+                "worker_id": job.worker_id,
+                "active_job_count": 0,
+                "last_heartbeat_at": None,
+                "lease_expires_at": None,
+                "stale": False,
+                "jobs": [],
+                "_last_heartbeat_raw": None,
+                "_lease_expires_raw": None,
+            },
+        )
+        worker["active_job_count"] += 1
+        worker["jobs"].append(
+            {
+                "job_id": job.job_id,
+                "correlation_id": job.correlation_id,
+                "status": job.status,
+                "analysis_name": job.analysis_name,
+                "progress_percent": job.progress_percent,
+                "progress_message": job.progress_message,
+                "heartbeat_at": _to_iso(job.heartbeat_at),
+                "lease_expires_at": _to_iso(job.lease_expires_at),
+            }
+        )
+        if job.heartbeat_at and (
+            worker["_last_heartbeat_raw"] is None or job.heartbeat_at > worker["_last_heartbeat_raw"]
+        ):
+            worker["_last_heartbeat_raw"] = job.heartbeat_at
+            worker["last_heartbeat_at"] = _to_iso(job.heartbeat_at)
+        if job.lease_expires_at and (
+            worker["_lease_expires_raw"] is None or job.lease_expires_at > worker["_lease_expires_raw"]
+        ):
+            worker["_lease_expires_raw"] = job.lease_expires_at
+            worker["lease_expires_at"] = _to_iso(job.lease_expires_at)
+        if job.lease_expires_at and job.lease_expires_at < now_naive:
+            worker["stale"] = True
+
+    payload_workers = []
+    for worker in workers.values():
+        worker.pop("_last_heartbeat_raw", None)
+        worker.pop("_lease_expires_raw", None)
+        payload_workers.append(worker)
+    return jsonify({"workers": payload_workers, "count": len(payload_workers), "generated_at": _to_iso(now)})
 
 
 @app.route("/analysis-jobs/<job_id>", methods=["GET"])
@@ -410,7 +540,14 @@ def retry_analysis_job(job_id):
 
     _reset_job_for_retry(job)
     db.session.commit()
-    log_event("analysis_job_retried", job_id=job.job_id, status=job.status, source_kind=job.source_kind)
+    log_event(
+        "analysis_job_retried",
+        job_id=job.job_id,
+        correlation_id=job.correlation_id,
+        status=job.status,
+        source_kind=job.source_kind,
+        retry_count=job.retry_count,
+    )
     return jsonify(_serialize_job(job))
 
 
@@ -435,6 +572,11 @@ def metrics():
     snapshot = _metrics_snapshot()
     body = _prometheus_metrics_text(snapshot)
     return Response(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.route("/diagnostics", methods=["GET"])
+def diagnostics():
+    return jsonify(diagnostics_snapshot())
 
 
 @app.route("/output/<filename>")

@@ -70,8 +70,14 @@ def maybe_run_maintenance(now=None, force=False):
     return _runtime.maybe_run_maintenance(now=now, force=force)
 
 
+def log_worker_startup(worker_id=None):
+    _sync_runtime_dependencies()
+    return _runtime.log_worker_startup(worker_id=worker_id)
+
+
 if __name__ == "__main__":
     if "--once" in sys.argv:
+        log_worker_startup(worker_id=get_worker_id())
         maybe_run_maintenance(force=True)
         recover_abandoned_jobs(worker_id=get_worker_id())
         process_next_job(worker_id=get_worker_id())

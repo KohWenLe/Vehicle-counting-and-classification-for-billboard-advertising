@@ -77,11 +77,15 @@ These endpoints help you monitor and operate the async analysis queue:
 - `GET /health` returns app health, database status, and a queue snapshot.
 - `GET /analysis-jobs?status=queued&limit=20` lists recent jobs with optional status filtering.
 - `GET /analysis-jobs/stats` returns queue depth, status counts, stale leases, and active worker count.
-- `GET /metrics` returns Prometheus-style metrics for queue depth, worker activity, history totals, and database availability.
+- `GET /analysis-jobs/workers` lists active workers, their current jobs, heartbeat times, and lease expiry times.
+- `GET /analysis-jobs/failures?limit=10` lists recent failed jobs with normalized failure reasons.
+- `GET /metrics` returns Prometheus-style metrics for queue depth, worker activity, job durations, failure reasons, history totals, and database availability.
+- `GET /diagnostics` returns runtime configuration, model-file checks, upload/output path checks, and available disk space.
 - `POST /analysis-jobs/<job_id>/retry` re-queues a failed or canceled job for another attempt.
 - `POST /analysis-jobs/<job_id>/cancel` requests cancellation for a queued or running job.
 - `POST /analysis-jobs/prune` removes old completed/failed/canceled jobs and annotated video files based on retention.
 - Backend and worker lifecycle events are emitted as structured JSON log lines to standard logging output.
+- Requests and jobs carry a correlation ID. You can send `X-Correlation-ID` on `POST /analysis-jobs`, and the backend will preserve it on the job record, response header, and worker logs.
 - Error responses now include both `error` and a machine-friendly `error_code`.
 
 ---
@@ -99,6 +103,10 @@ These endpoints help you monitor and operate the async analysis queue:
 - `TVA_PIPELINE_PROGRESS_REPORT_FRAMES`: how many processed frames between pipeline progress reports. Default is `45`.
 - `TVA_PIPELINE_TRACKER_BACKEND`: tracker backend for the pipeline. Default is `centroid`. The heavier alternative is `deepsort`.
 - `TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES`: number of classifier samples to average before committing a track's vehicle class. Default is `3`; use `1` for the old one-shot behavior.
+- `TVA_YOLO_MODEL`: model filename/path shown by diagnostics for YOLO readiness checks. Default is `yolo11n.pt`.
+- `TVA_CLASSIFIER_MODEL`: model filename/path shown by diagnostics for classifier readiness checks. Default is `mobilenetv3_original.keras`.
+- `TVA_DISK_WARN_BYTES`: free-space threshold where diagnostics marks a path as `warning`. Default is 5 GB.
+- `TVA_DISK_CRITICAL_BYTES`: free-space threshold where diagnostics marks a path as `critical`. Default is 1 GB.
 - `TVA_PROGRESS_SAVE_INTERVAL_SECONDS`: minimum seconds between worker progress writes to the database. Default is `2`.
 - `TVA_PROGRESS_SAVE_PERCENT_STEP`: minimum progress-percent jump before forcing a worker progress write. Default is `5`.
 - `TVA_ENABLE_TEST_ROUTES`: set to `true` only in development if you need the debug/test routes.
@@ -148,4 +156,5 @@ email : jameskoh0513@gmail.com
 ---
 
 **Thank you for reviewing this Final Year Project!**
+
 
