@@ -90,6 +90,17 @@
           <p v-if="job.error" class="job-error">{{ job.error }}</p>
 
           <div class="job-actions">
+            <button type="button" class="ghost-btn" @click="$emit('view-job', job.job_id)">
+              View Details
+            </button>
+            <button
+              type="button"
+              class="primary-btn"
+              :disabled="!canOpenResults(job)"
+              @click="$emit('open-results', job)"
+            >
+              Open Results
+            </button>
             <button
               type="button"
               class="secondary-btn"
@@ -153,6 +164,8 @@ const emit = defineEmits([
   "apply-filters",
   "prev-page",
   "next-page",
+  "view-job",
+  "open-results",
   "retry-job",
   "cancel-job",
 ]);
@@ -195,6 +208,10 @@ function canRetry(job) {
 
 function canCancel(job) {
   return ["queued", "running", "canceling"].includes(job.status);
+}
+
+function canOpenResults(job) {
+  return job.status === "completed" && !!job.result;
 }
 
 function formatSource(sourceKind) {
