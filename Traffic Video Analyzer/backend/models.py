@@ -37,6 +37,7 @@ class AnalysisJob(db.Model):
     )
 
     job_id = db.Column(db.String(32), primary_key=True)
+    correlation_id = db.Column(db.String(128), nullable=True, index=True)
     status = db.Column(db.String(32), nullable=False, default="queued")
     analysis_name = db.Column(db.String(256), nullable=True)
     input_path = db.Column(db.Text, nullable=True)
@@ -47,6 +48,8 @@ class AnalysisJob(db.Model):
     progress_message = db.Column(db.String(256), nullable=True)
     error = db.Column(db.Text, nullable=True)
     result_json = db.Column(db.Text, nullable=True)
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+    last_retried_at = db.Column(db.DateTime, nullable=True)
     worker_id = db.Column(db.String(128), nullable=True)
     heartbeat_at = db.Column(db.DateTime, nullable=True)
     lease_expires_at = db.Column(db.DateTime, nullable=True)
@@ -63,6 +66,9 @@ def _ensure_analysis_job_columns():
         for row in db.session.execute(text("PRAGMA table_info(analysis_job)")).fetchall()
     }
     missing_column_sql = {
+        "correlation_id": "ALTER TABLE analysis_job ADD COLUMN correlation_id VARCHAR(128)",
+        "retry_count": "ALTER TABLE analysis_job ADD COLUMN retry_count INTEGER DEFAULT 0 NOT NULL",
+        "last_retried_at": "ALTER TABLE analysis_job ADD COLUMN last_retried_at DATETIME",
         "worker_id": "ALTER TABLE analysis_job ADD COLUMN worker_id VARCHAR(128)",
         "heartbeat_at": "ALTER TABLE analysis_job ADD COLUMN heartbeat_at DATETIME",
         "lease_expires_at": "ALTER TABLE analysis_job ADD COLUMN lease_expires_at DATETIME",
@@ -79,6 +85,7 @@ def _ensure_analysis_job_indexes():
         "CREATE INDEX IF NOT EXISTS ix_analysis_job_status_created_at ON analysis_job (status, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_analysis_job_completed_at ON analysis_job (completed_at)",
         "CREATE INDEX IF NOT EXISTS ix_analysis_job_worker_id ON analysis_job (worker_id)",
+        "CREATE INDEX IF NOT EXISTS ix_analysis_job_correlation_id ON analysis_job (correlation_id)",
     ]
     for sql in index_sql:
         db.session.execute(text(sql))

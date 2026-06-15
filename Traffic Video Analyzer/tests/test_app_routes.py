@@ -230,6 +230,26 @@ class AnalyzeRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "queued")
         self.assertEqual(payload["analysis_name"], "pm-commute")
 
+    def test_analysis_job_preserves_request_correlation_id(self):
+        create_response = self.client.post(
+            "/analysis-jobs",
+            headers={"X-Correlation-ID": "campaign-trace-123"},
+            data={
+                "video": (BytesIO(b"video-bytes"), "traffic.mp4"),
+                "analysis_name": "trace-check",
+                "save_annotated": "false",
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(create_response.status_code, 202)
+        payload = create_response.get_json()
+        self.assertEqual(payload["correlation_id"], "campaign-trace-123")
+        self.assertEqual(create_response.headers["X-Correlation-ID"], "campaign-trace-123")
+
+        status_response = self.client.get(f"/analysis-jobs/{payload['job_id']}")
+        self.assertEqual(status_response.get_json()["correlation_id"], "campaign-trace-123")
+
     def test_completed_job_can_be_loaded_after_module_reload(self):
         with mock.patch.object(self.app_module, "analyze_with_gpt", return_value=None), mock.patch.object(
             self.worker_module, "analyze_with_gpt", return_value=None
@@ -398,6 +418,8 @@ class AnalyzeRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "queued")
         self.assertFalse(payload["cancel_requested"])
         self.assertEqual(payload["progress_percent"], 0)
+        self.assertEqual(payload["retry_count"], 1)
+        self.assertIsNotNone(payload["last_retried_at"])
         self.assertNotIn("error", payload)
         self.assertNotIn("result", payload)
 
@@ -408,6 +430,103 @@ class AnalyzeRouteTests(unittest.TestCase):
 
         self.assertIsNotNone(processed_job)
         self.assertEqual(processed_job.job_id, "retry-job")
+
+    def test_recent_failures_endpoint_returns_failure_reasons(self):
+        now = self.app_module._utcnow()
+        with self.app_module.app.app_context():
+            self.app_module.db.session.add_all(
+                [
+                    self.app_module.AnalysisJob(
+                        job_id="failed-timeout",
+                        correlation_id="trace-timeout",
+                        status="failed",
+                        analysis_name="timeout",
+                        input_path="camera://timeout",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        error="Analysis timed out.",
+                        retry_count=2,
+                        created_at=now - datetime.timedelta(minutes=3),
+                        updated_at=now - datetime.timedelta(minutes=2),
+                        completed_at=now - datetime.timedelta(minutes=2),
+                    ),
+                    self.app_module.AnalysisJob(
+                        job_id="failed-source",
+                        status="failed",
+                        analysis_name="source",
+                        input_path="camera://source",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        error="Cannot open video source",
+                        retry_count=0,
+                        created_at=now - datetime.timedelta(minutes=2),
+                        updated_at=now - datetime.timedelta(minutes=1),
+                        completed_at=now - datetime.timedelta(minutes=1),
+                    ),
+                ]
+            )
+            self.app_module.db.session.commit()
+
+        response = self.client.get("/analysis-jobs/failures?limit=1")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["total"], 2)
+        self.assertEqual(payload["failures"][0]["job_id"], "failed-source")
+        self.assertEqual(payload["failures"][0]["failure_reason"], "source_unavailable")
+
+    def test_active_workers_endpoint_returns_worker_details(self):
+        now = self.app_module._utcnow()
+        future = now + datetime.timedelta(minutes=2)
+        with self.app_module.app.app_context():
+            self.app_module.db.session.add_all(
+                [
+                    self.app_module.AnalysisJob(
+                        job_id="worker-job-a",
+                        status="running",
+                        analysis_name="worker-a",
+                        input_path="camera://worker-a",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        progress_percent=45,
+                        progress_message="Processing",
+                        worker_id="worker-1",
+                        heartbeat_at=now,
+                        lease_expires_at=future,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    self.app_module.AnalysisJob(
+                        job_id="worker-job-b",
+                        status="canceling",
+                        analysis_name="worker-b",
+                        input_path="camera://worker-b",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        progress_percent=55,
+                        progress_message="Canceling",
+                        worker_id="worker-1",
+                        heartbeat_at=now,
+                        lease_expires_at=future,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+            self.app_module.db.session.commit()
+
+        response = self.client.get("/analysis-jobs/workers")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["workers"][0]["worker_id"], "worker-1")
+        self.assertEqual(payload["workers"][0]["active_job_count"], 2)
+        self.assertEqual(
+            {job["job_id"] for job in payload["workers"][0]["jobs"]},
+            {"worker-job-a", "worker-job-b"},
+        )
 
     def test_job_list_endpoint_supports_status_filter_and_limit(self):
         now = self.app_module._utcnow()
@@ -654,6 +773,63 @@ class AnalyzeRouteTests(unittest.TestCase):
         self.assertIn("traffic_video_analysis_queue_depth 1", body)
         self.assertIn("traffic_video_analysis_history_records_total 1", body)
 
+    def test_metrics_exports_duration_and_failure_breakdown(self):
+        now = self.app_module._utcnow()
+        with self.app_module.app.app_context():
+            self.app_module.db.session.add_all(
+                [
+                    self.app_module.AnalysisJob(
+                        job_id="completed-duration",
+                        status="completed",
+                        analysis_name="completed-duration",
+                        input_path="camera://done",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        created_at=now - datetime.timedelta(seconds=80),
+                        updated_at=now,
+                        started_at=now - datetime.timedelta(seconds=60),
+                        completed_at=now,
+                    ),
+                    self.app_module.AnalysisJob(
+                        job_id="failed-timeout",
+                        status="failed",
+                        analysis_name="failed-timeout",
+                        input_path="camera://timeout",
+                        source_kind="camera_url",
+                        save_annotated=False,
+                        error="Analysis timed out.",
+                        retry_count=2,
+                        created_at=now - datetime.timedelta(seconds=40),
+                        updated_at=now,
+                        started_at=now - datetime.timedelta(seconds=30),
+                        completed_at=now,
+                    ),
+                ]
+            )
+            self.app_module.db.session.commit()
+
+        response = self.client.get("/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn("traffic_video_analysis_queue_wait_seconds_avg", body)
+        self.assertIn("traffic_video_analysis_processing_seconds_avg", body)
+        self.assertIn('traffic_video_analysis_failures_total{reason="timeout"} 1', body)
+        self.assertIn("traffic_video_analysis_job_retries_total 2", body)
+
+    def test_diagnostics_reports_runtime_configuration_and_paths(self):
+        response = self.client.get("/diagnostics")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn(payload["status"], {"ok", "degraded"})
+        self.assertIn("configuration", payload)
+        self.assertIn("paths", payload)
+        self.assertIn("models", payload)
+        self.assertTrue(payload["paths"]["upload_folder"]["exists"])
+        self.assertTrue(payload["paths"]["output_folder"]["exists"])
+        self.assertIn(payload["paths"]["output_folder"]["disk_status"], {"ok", "warning", "critical", "unavailable"})
+
     def test_async_job_status_returns_404_for_unknown_job(self):
         response = self.client.get("/analysis-jobs/does-not-exist")
 
@@ -681,6 +857,7 @@ class AnalyzeRouteTests(unittest.TestCase):
             "_job_video_source",
             "_persist_analysis_record",
             "_job_stats_snapshot",
+            "diagnostics_snapshot",
             "prune_terminal_jobs",
             "execute_analysis",
             "analyze_with_gpt",

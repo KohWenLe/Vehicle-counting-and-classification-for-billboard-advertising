@@ -53,6 +53,7 @@ log_event = _observability.log_event
 _job_stats_snapshot = _observability._job_stats_snapshot
 _metrics_snapshot = _observability._metrics_snapshot
 _prometheus_metrics_text = _observability._prometheus_metrics_text
+diagnostics_snapshot = _observability.diagnostics_snapshot
 
 run_video_pipeline = _services.run_video_pipeline
 run_local_analysis = _services.run_local_analysis
