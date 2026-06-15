@@ -152,6 +152,21 @@
         @apply-filters="applyJobFilters"
         @prev-page="goToPreviousJobsPage"
         @next-page="goToNextJobsPage"
+        @view-job="openJobDetail"
+        @open-results="openJobResults"
+        @retry-job="retryJob"
+        @cancel-job="cancelRecentJob"
+      />
+
+      <JobDetailDrawer
+        :visible="jobDetailVisible"
+        :job="selectedJob"
+        :is-loading="jobDetailLoading"
+        :error="jobDetailError"
+        :action-state="jobActionState"
+        @close="closeJobDetail"
+        @refresh="refreshSelectedJob"
+        @open-results="openJobResults"
         @retry-job="retryJob"
         @cancel-job="cancelRecentJob"
       />
@@ -173,114 +188,35 @@
         @next-page="goToNextHistoryPage"
       />
 
-      <section v-if="resultEntries.length" class="results-grid">
-        <div class="panel chart-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Results</p>
-              <h2>Vehicle Class Distribution</h2>
-            </div>
-          </div>
-
-          <table class="results-table">
-            <thead>
-              <tr>
-                <th>Class</th>
-                <th>Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="([label, value], index) in resultEntries" :key="`${label}-${index}`">
-                <td>{{ label }}</td>
-                <td>{{ value }}</td>
-              </tr>
-            </tbody>
-          </table>
-
-          <div class="results-cards">
-            <article v-for="([label, value], index) in resultEntries" :key="`result-card-${label}-${index}`" class="result-card">
-              <span>{{ label }}</span>
-              <strong>{{ value }}</strong>
-            </article>
-          </div>
-
-          <div class="chart-shell">
-            <PieChart :counts="result" />
-          </div>
-        </div>
-
-        <div v-if="timeSeries.length" class="panel chart-panel chart-panel--wide">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Flow</p>
-              <h2>Traffic Flow Over Time</h2>
-            </div>
-          </div>
-
-          <TimeSeriesChart :time-series="timeSeries" :main-class-list="mainClassList" />
-        </div>
-
-        <InsightPanel :recommendations="recommendations" :gpt-recommendations="gpt_recommendations" />
-
-        <div v-if="annotatedUrl" class="panel media-panel">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Output</p>
-              <h2>Annotated Video</h2>
-            </div>
-          </div>
-          <video :key="annotatedUrl" width="100%" controls preload="metadata" class="result-video">
-            <source :src="annotatedUrl" type="video/mp4" />
-            Your browser does not support the video tag.
-          </video>
-          <p class="media-note">
-            If playback does not start here, open the generated file directly:
-            <a :href="annotatedUrl" target="_blank" rel="noopener">Open annotated video</a>
-          </p>
-        </div>
-      </section>
+      <ResultsDashboard
+        :counts="result"
+        :peak="peak"
+        :recommendations="recommendations"
+        :gpt-recommendations="gpt_recommendations"
+        :time-series="timeSeries"
+        :main-class-list="mainClassList"
+        :annotated-url="annotatedUrl"
+      />
     </main>
   </div>
 </template>
 
 <script>
-import { defineAsyncComponent } from "vue";
 import AnalysisStatus from "./components/AnalysisStatus.vue";
 import HistoryPanel from "./components/HistoryPanel.vue";
-import InsightPanel from "./components/InsightPanel.vue";
+import JobDetailDrawer from "./components/JobDetailDrawer.vue";
 import NotificationStack from "./components/NotificationStack.vue";
 import RecentJobsPanel from "./components/RecentJobsPanel.vue";
-
-const ChartLoadingState = {
-  template: `
-    <div class="chart-loading-state">
-      <div class="chart-loading-bar"></div>
-      <p>Loading analytics visual...</p>
-    </div>
-  `,
-};
-
-const PieChart = defineAsyncComponent({
-  loader: () => import("./components/PieChart.vue"),
-  loadingComponent: ChartLoadingState,
-  delay: 120,
-});
-
-const TimeSeriesChart = defineAsyncComponent({
-  loader: () => import("./components/TimeSeriesChart.vue"),
-  loadingComponent: ChartLoadingState,
-  delay: 120,
-});
+import ResultsDashboard from "./components/ResultsDashboard.vue";
 
 export default {
   components: {
-    PieChart,
-    TimeSeriesChart,
     AnalysisStatus,
     HistoryPanel,
-    InsightPanel,
+    JobDetailDrawer,
     NotificationStack,
     RecentJobsPanel,
+    ResultsDashboard,
   },
   data() {
     return {
@@ -339,6 +275,10 @@ export default {
         sourceKind: "",
         analysisName: "",
       },
+      jobDetailVisible: false,
+      selectedJob: null,
+      jobDetailLoading: false,
+      jobDetailError: null,
       jobActionState: {},
       gpt_recommendations: null,
       notifications: [],
@@ -543,20 +483,21 @@ export default {
       this.annotatedUrl = null;
       this.annotatedDownloadName = null;
     },
-    applyAnalysisResult(payload) {
+    buildAnnotatedUrl(filename, cacheKey = Date.now()) {
+      return filename ? `/output/${encodeURIComponent(filename)}?v=${encodeURIComponent(cacheKey)}` : null;
+    },
+    applyAnalysisResult(payload, options = {}) {
       this.result = payload.counts || null;
       this.peak = payload.peak || null;
       this.recommendations = [].concat(payload.recommendations || []);
       this.gpt_recommendations = payload.gpt_recommendations || null;
       this.timeSeries = payload.time_series || [];
       this.annotatedDownloadName = payload.annotated_video || null;
-      this.annotatedUrl = payload.annotated_video
-        ? `/output/${encodeURIComponent(payload.annotated_video)}?v=${Date.now()}`
-        : null;
+      this.annotatedUrl = this.buildAnnotatedUrl(payload.annotated_video);
       this.pushNotification({
-        title: "Analysis Complete",
-        message: "Vehicle counts, charts, and recommendations are ready to review.",
-        tone: "success",
+        title: options.title || "Analysis Complete",
+        message: options.message || "Vehicle counts, charts, and recommendations are ready to review.",
+        tone: options.tone || "success",
       });
       this.fetchRecentJobs({ preserveOffset: false });
       if (this.historyVisible) {
@@ -634,6 +575,9 @@ export default {
       }
       const nextJobs = this.recentJobs.map((job) => (job.job_id === jobPayload.job_id ? { ...job, ...jobPayload } : job));
       this.recentJobs = nextJobs;
+      if (this.selectedJob?.job_id === jobPayload.job_id) {
+        this.selectedJob = { ...this.selectedJob, ...jobPayload };
+      }
     },
     buildDefaultAnalysisName() {
       const now = new Date();
@@ -928,6 +872,70 @@ export default {
       this.historyOffset += this.historyLimit;
       await this.fetchHistory();
     },
+    closeJobDetail() {
+      this.jobDetailVisible = false;
+      this.jobDetailError = null;
+    },
+    async fetchJobDetail(jobId) {
+      this.jobDetailLoading = true;
+      this.jobDetailError = null;
+      try {
+        const payload = await this.getJson(`/analysis-jobs/${jobId}`);
+        this.selectedJob = payload;
+        this.syncRecentJob(payload);
+        return payload;
+      } catch (error) {
+        this.jobDetailError = this.normalizeError(error, "Could not load job details");
+        this.pushNotification({
+          title: "Job Detail Unavailable",
+          message: this.jobDetailError,
+          tone: "error",
+          duration: 5500,
+        });
+        return null;
+      } finally {
+        this.jobDetailLoading = false;
+      }
+    },
+    async openJobDetail(jobId) {
+      const localJob = this.recentJobs.find((job) => job.job_id === jobId);
+      this.selectedJob = localJob || null;
+      this.jobDetailVisible = true;
+      await this.fetchJobDetail(jobId);
+    },
+    async refreshSelectedJob() {
+      if (!this.selectedJob?.job_id) {
+        return;
+      }
+      await this.fetchJobDetail(this.selectedJob.job_id);
+    },
+    async openJobResults(jobOrId) {
+      const jobId = typeof jobOrId === "string" ? jobOrId : jobOrId?.job_id;
+      let job = typeof jobOrId === "object" && jobOrId ? jobOrId : null;
+
+      if (!job?.result && jobId) {
+        job = await this.fetchJobDetail(jobId);
+      }
+
+      if (!job?.result) {
+        this.pushNotification({
+          title: "Results Unavailable",
+          message: "This job does not have completed analysis results yet.",
+          tone: "warning",
+        });
+        return;
+      }
+
+      this.applyAnalysisResult(job.result, {
+        title: "Results Opened",
+        message: `${job.analysis_name || "Untitled analysis"} is now shown in the dashboard.`,
+      });
+      this.outputFileName = job.result.analysis_name || job.analysis_name || this.outputFileName;
+      this.jobDetailVisible = false;
+      window.requestAnimationFrame(() => {
+        document.querySelector(".results-dashboard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    },
     async retryJob(jobId) {
       this.setJobActionState(jobId, "retrying");
       try {
@@ -1128,19 +1136,13 @@ export default {
   font-size: 1.05rem;
 }
 
-.workspace-grid,
-.results-grid {
+.workspace-grid {
   display: grid;
   gap: 1.5rem;
 }
 
 .workspace-grid {
   grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.95fr);
-}
-
-.results-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
 }
 
 .panel {
@@ -1343,107 +1345,8 @@ input[type="text"]:focus {
   border: 1px solid rgba(226, 232, 240, 0.95);
 }
 
-.results-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 1.25rem;
-}
-
-.results-cards {
-  display: none;
-}
-
-.results-table th,
-.results-table td {
-  padding: 0.8rem 0.65rem;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.95);
-  text-align: left;
-}
-
-.results-table th {
-  background: rgba(14, 165, 233, 0.08);
-}
-
-.result-card {
-  border-radius: 1rem;
-  padding: 0.9rem 1rem;
-  border: 1px solid rgba(226, 232, 240, 0.95);
-  background: rgba(248, 250, 252, 0.92);
-}
-
-.result-card span {
-  display: block;
-  color: #64748b;
-  font-size: 0.9rem;
-  margin-bottom: 0.25rem;
-}
-
-.result-card strong {
-  color: #0f172a;
-  font-size: 1.05rem;
-}
-
-.chart-shell {
-  min-height: 260px;
-}
-
-:deep(.chart-loading-state) {
-  min-height: 260px;
-  display: grid;
-  place-items: center;
-  gap: 0.8rem;
-  color: #475569;
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.9), rgba(241, 245, 249, 0.82));
-  border-radius: 1rem;
-}
-
-:deep(.chart-loading-bar) {
-  width: min(280px, 78%);
-  height: 0.8rem;
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(14, 165, 233, 0.18), rgba(245, 158, 11, 0.32), rgba(14, 165, 233, 0.18));
-  background-size: 200% 100%;
-  animation: shimmer 1.2s linear infinite;
-}
-
-.chart-panel--wide {
-  grid-column: 1 / -1;
-}
-
-.media-panel {
-  grid-column: 1 / -1;
-}
-
-.result-video {
-  width: 100%;
-  border-radius: 1rem;
-  overflow: hidden;
-  background: #020617;
-}
-
-.media-note {
-  margin: 0.85rem 0 0;
-  color: #475569;
-  line-height: 1.5;
-}
-
-.media-note a {
-  color: #0284c7;
-  font-weight: 700;
-}
-
-@keyframes shimmer {
-  from {
-    background-position: 0% 0;
-  }
-  to {
-    background-position: 200% 0;
-  }
-}
-
 @media (max-width: 980px) {
-  .workspace-grid,
-  .results-grid {
+  .workspace-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1470,14 +1373,5 @@ input[type="text"]:focus {
     max-width: none;
   }
 
-  .results-table {
-    display: none;
-  }
-
-  .results-cards {
-    display: grid;
-    gap: 0.8rem;
-    margin-bottom: 1.1rem;
-  }
 }
 </style>
