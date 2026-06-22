@@ -252,33 +252,6 @@ def handle_request_entity_too_large(exc):
     return _error_response("Uploaded file exceeds the maximum allowed size.", "request_too_large", 413)
 
 
-@app.route("/analyze", methods=["POST"])
-def analyze():
-    temp_path = None
-    try:
-        prepared = _prepare_analysis_request(request)
-        temp_path = prepared["temp_path"]
-        response = execute_analysis(
-            video_path=prepared["video_path"],
-            start_dt=prepared["start_dt"],
-            save_annotated=prepared["save_annotated"],
-            analysis_name=prepared["analysis_name"],
-        )
-        _persist_analysis_record(response, prepared["analysis_name"])
-        return jsonify(response)
-    except RequestEntityTooLarge as exc:
-        raise exc
-    except ApiError as exc:
-        log_event("analysis_request_invalid", level="warning", error=exc.message, error_code=exc.code)
-        return _error_response(exc.message, exc.code, exc.status_code, exc.details)
-    except Exception as exc:
-        app.logger.exception("Unhandled error in /analyze")
-        log_event("analysis_request_failed", level="error", error=str(exc))
-        return _error_response(str(exc), "analysis_request_failed", 500)
-    finally:
-        _cleanup_uploaded_file(temp_path)
-
-
 @app.route("/analysis-jobs", methods=["POST"])
 def create_analysis_job():
     try:
@@ -649,6 +622,37 @@ def get_history():
 
 
 if TEST_ROUTES_ENABLED:
+    # Synchronous analyze: runs the full ML pipeline inside the request thread
+    # and loads models into the API process, bypassing the job queue's leasing,
+    # cancellation, and timeout handling. Kept only as a test/dev affordance and
+    # not registered in production. Use POST /analysis-jobs for real work.
+    @app.route("/analyze", methods=["POST"])
+    def analyze():
+        temp_path = None
+        try:
+            prepared = _prepare_analysis_request(request)
+            temp_path = prepared["temp_path"]
+            response = execute_analysis(
+                video_path=prepared["video_path"],
+                start_dt=prepared["start_dt"],
+                save_annotated=prepared["save_annotated"],
+                analysis_name=prepared["analysis_name"],
+            )
+            _persist_analysis_record(response, prepared["analysis_name"])
+            return jsonify(response)
+        except RequestEntityTooLarge as exc:
+            raise exc
+        except ApiError as exc:
+            log_event("analysis_request_invalid", level="warning", error=exc.message, error_code=exc.code)
+            return _error_response(exc.message, exc.code, exc.status_code, exc.details)
+        except Exception as exc:
+            app.logger.exception("Unhandled error in /analyze")
+            log_event("analysis_request_failed", level="error", error=str(exc))
+            return _error_response(str(exc), "analysis_request_failed", 500)
+        finally:
+            _cleanup_uploaded_file(temp_path)
+
+
     @app.route("/test_analysis", methods=["POST"])
     def test_analysis():
         data = request.get_json() or {}

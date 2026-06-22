@@ -83,6 +83,17 @@ class AnalyzeRouteTests(unittest.TestCase):
         sys.modules["analysis"] = fake_analysis
         self.addCleanup(sys.modules.pop, "analysis", None)
 
+        self._load_app_module()
+
+    def _load_app_module(self, enable_test_routes=False):
+        # Test routes (including the gated synchronous /analyze) are registered
+        # only when TVA_ENABLE_TEST_ROUTES is set at import time. Re-import the
+        # app facade so backend.core recomputes the flag.
+        if enable_test_routes:
+            os.environ["TVA_ENABLE_TEST_ROUTES"] = "1"
+        else:
+            os.environ.pop("TVA_ENABLE_TEST_ROUTES", None)
+
         sys.modules.pop("app", None)
         sys.modules.pop("worker", None)
         self.app_module = importlib.import_module("app")
@@ -96,12 +107,13 @@ class AnalyzeRouteTests(unittest.TestCase):
         self.client = self.app_module.app.test_client()
 
     def tearDown(self):
-        for key in ["TVA_DATABASE_URI", "TVA_UPLOAD_FOLDER", "TVA_OUTPUT_FOLDER", "TVA_DISABLE_GPT"]:
+        for key in ["TVA_DATABASE_URI", "TVA_UPLOAD_FOLDER", "TVA_OUTPUT_FOLDER", "TVA_DISABLE_GPT", "TVA_ENABLE_TEST_ROUTES"]:
             os.environ.pop(key, None)
         sys.modules.pop("app", None)
         sys.modules.pop("worker", None)
 
     def test_analyze_returns_peak_history_and_annotated_video_details(self):
+        self._load_app_module(enable_test_routes=True)
         with mock.patch.object(self.app_module, "analyze_with_gpt", return_value=None):
             response = self.client.post(
                 "/analyze",
@@ -128,6 +140,7 @@ class AnalyzeRouteTests(unittest.TestCase):
         self.assertEqual(history[0]["analysis_name"], "weekday-am")
 
     def test_output_route_serves_generated_mp4_with_video_mimetype(self):
+        self._load_app_module(enable_test_routes=True)
         with mock.patch.object(self.app_module, "analyze_with_gpt", return_value=None):
             response = self.client.post(
                 "/analyze",

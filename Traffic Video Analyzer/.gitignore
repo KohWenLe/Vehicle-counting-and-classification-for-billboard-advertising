@@ -1,0 +1,27 @@
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+# (.env.sample is intentionally tracked as a template)
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Runtime artifacts (generated, not source)
+output/
+uploads/
+runtime_logs/
+instance/
+tests_artifacts/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

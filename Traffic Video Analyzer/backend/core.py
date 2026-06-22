@@ -4,6 +4,8 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 
 BASE_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -95,6 +97,31 @@ DEFAULT_DB_PATH = os.path.join(INSTANCE_DIR, "analysis_history.db").replace("\\"
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+SQLITE_BUSY_TIMEOUT_MS = max(0, _int_env("TVA_SQLITE_BUSY_TIMEOUT_MS", 5000))
+
+
+@event.listens_for(Engine, "connect")
+def _configure_sqlite_connection(dbapi_connection, connection_record):
+    """Enable WAL + a busy timeout on every SQLite connection.
+
+    The API and worker run as separate processes against one SQLite file and
+    commit frequently (progress heartbeats, job state). The default rollback
+    journal takes a database-level write lock, so concurrent writers raise
+    "database is locked". WAL lets readers and a single writer coexist, and the
+    busy timeout makes a contending writer wait instead of failing immediately.
+    Guarded to SQLite so a Postgres TVA_DATABASE_URI is unaffected.
+    """
+    if type(dbapi_connection).__module__.split(".")[0] not in {"sqlite3", "pysqlite2"}:
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
 
 app = Flask(__name__)
 CORS(app)

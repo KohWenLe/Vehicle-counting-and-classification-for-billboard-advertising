@@ -267,6 +267,39 @@ def process_video(
         else:
             tracks = tracker.update_tracks([], frame=frame_resized)
 
+        # Classify all qualifying crops for this detection frame in a single
+        # batched forward pass. Running the classifier once per track (batch
+        # size 1) inside the loop below dominated per-frame cost on busy frames.
+        frame_probs = {}
+        if frame_idx % detection_interval == 0:
+            batch_track_ids = []
+            batch_inputs = []
+            for track in tracks:
+                if not track.is_confirmed():
+                    continue
+                track_id = track.track_id
+                mem = track_memory.get(track_id, {"inside_roi": False, "counted": False})
+                if mem["counted"]:
+                    continue
+                x1, y1, x2, y2 = map(int, track.to_ltrb())
+                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                if cv2.pointPolygonTest(roi_polygon, (cx, cy), False) < 0:
+                    continue
+                crop = frame_resized[y1:y2, x1:x2]
+                if crop.shape[0] < min_h or crop.shape[1] < min_w:
+                    continue
+                rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                small = cv2.resize(rgb, (224, 224))
+                arr = keras_preprocess(img_to_array(small))
+                batch_track_ids.append(track_id)
+                batch_inputs.append(arr)
+
+            if batch_inputs:
+                batch = np.stack(batch_inputs, axis=0)
+                batch_probs = classifier_model.predict(batch, verbose=0)
+                for sample_track_id, probs in zip(batch_track_ids, batch_probs):
+                    frame_probs[sample_track_id] = probs
+
         for track in tracks:
             if not track.is_confirmed():
                 continue
@@ -283,15 +316,8 @@ def process_video(
                 mem["classification_started"] = True
 
             if now_inside and not counted and frame_idx % detection_interval == 0:
-                crop = frame_resized[y1:y2, x1:x2]
-                if crop.shape[0] >= min_h and crop.shape[1] >= min_w:
-                    rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                    small = cv2.resize(rgb, (224, 224))
-                    arr = img_to_array(small)
-                    arr = keras_preprocess(arr)
-                    arr = np.expand_dims(arr, axis=0)
-                    probs = classifier_model.predict(arr, verbose=0)
-                    classification_votes.add_sample(track_id, probs[0])
+                if track_id in frame_probs:
+                    classification_votes.add_sample(track_id, frame_probs[track_id])
 
                 if classification_votes.is_ready(track_id):
                     cls_label = commit_track_classification(track_id)
