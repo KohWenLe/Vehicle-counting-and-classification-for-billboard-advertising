@@ -25,3 +25,5 @@ tests_artifacts/
 .idea/
 .vscode/
 *.swp
+
+*.mp4

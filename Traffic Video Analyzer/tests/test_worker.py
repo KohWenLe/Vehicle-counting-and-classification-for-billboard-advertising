@@ -3,6 +3,7 @@ import datetime
 import os
 import shutil
 import sys
+import time
 import types
 import unittest
 import uuid
@@ -304,6 +305,111 @@ class WorkerTests(unittest.TestCase):
             completed = self.app_module.db.session.get(self.app_module.AnalysisJob, "naive-progress-job")
             self.assertEqual(completed.status, "completed")
             self.assertGreaterEqual(completed.progress_percent, 15)
+
+    def test_process_job_refreshes_lease_while_analysis_has_no_progress_callbacks(self):
+        initial_heartbeat = datetime.datetime.utcnow()
+        with self.app_module.app.app_context():
+            job = self.app_module.AnalysisJob(
+                job_id="model-loading-job",
+                status="running",
+                analysis_name="slow-model-load",
+                input_path="camera-1",
+                source_kind="camera_url",
+                save_annotated=False,
+                progress_percent=0,
+                progress_message="Starting analysis...",
+                start_dt=initial_heartbeat,
+                created_at=initial_heartbeat,
+                updated_at=initial_heartbeat,
+                started_at=initial_heartbeat,
+                worker_id="worker-a",
+                heartbeat_at=initial_heartbeat,
+                lease_expires_at=initial_heartbeat + datetime.timedelta(seconds=30),
+            )
+            self.app_module.db.session.add(job)
+            self.app_module.db.session.commit()
+
+        observed = {"heartbeat_advanced": False}
+
+        def fake_execute_analysis(**kwargs):
+            del kwargs
+            time.sleep(0.2)
+            self.worker_module.db.session.expire_all()
+            current = self.worker_module.db.session.get(self.worker_module.AnalysisJob, "model-loading-job")
+            observed["heartbeat_advanced"] = current.heartbeat_at > initial_heartbeat
+            return {
+                "counts": {
+                    "Commercial Vehicles": 1,
+                    "High-End Vehicles": 0,
+                    "Low-End Vehicles": 0,
+                    "Mid-Range Vehicles": 0,
+                    "Motorcycle": 0,
+                    "Unclassified": 0,
+                },
+                "time_series": [],
+                "peak": None,
+                "recommendations": [],
+                "analysis_name": "slow-model-load",
+            }
+
+        with mock.patch.object(
+            self.worker_module._runtime,
+            "LEASE_HEARTBEAT_INTERVAL_SECONDS",
+            0.05,
+            create=True,
+        ), mock.patch.object(self.worker_module, "execute_analysis", side_effect=fake_execute_analysis):
+            self.worker_module.process_job("model-loading-job", worker_id="worker-a")
+
+        self.assertTrue(observed["heartbeat_advanced"])
+
+    def test_worker_that_loses_job_ownership_does_not_delete_upload_or_change_status(self):
+        upload_path = self.temp_path / "uploads" / "ownership-check.mp4"
+        upload_path.parent.mkdir(parents=True, exist_ok=True)
+        upload_path.write_bytes(b"video")
+        now = self.app_module._utcnow()
+
+        with self.app_module.app.app_context():
+            job = self.app_module.AnalysisJob(
+                job_id="ownership-lost-job",
+                status="running",
+                analysis_name="ownership-check",
+                input_path=str(upload_path),
+                source_kind="upload",
+                save_annotated=False,
+                progress_percent=0,
+                progress_message="Starting analysis...",
+                start_dt=now,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+                worker_id="worker-a",
+                heartbeat_at=now,
+                lease_expires_at=now + datetime.timedelta(seconds=30),
+            )
+            self.app_module.db.session.add(job)
+            self.app_module.db.session.commit()
+
+        class AnalysisCancelled(RuntimeError):
+            pass
+
+        def fake_execute_analysis(**kwargs):
+            del kwargs
+            current = self.worker_module.db.session.get(self.worker_module.AnalysisJob, "ownership-lost-job")
+            current.worker_id = "worker-b"
+            current.status = "running"
+            current.progress_message = "Reclaimed by worker-b."
+            current.lease_expires_at = self.worker_module._runtime._utcnow() + datetime.timedelta(seconds=30)
+            self.worker_module.db.session.commit()
+            raise AnalysisCancelled("worker ownership changed")
+
+        with mock.patch.object(self.worker_module, "execute_analysis", side_effect=fake_execute_analysis):
+            self.worker_module.process_job("ownership-lost-job", worker_id="worker-a")
+
+        with self.app_module.app.app_context():
+            current = self.app_module.db.session.get(self.app_module.AnalysisJob, "ownership-lost-job")
+            self.assertEqual(current.status, "running")
+            self.assertEqual(current.worker_id, "worker-b")
+        self.assertTrue(upload_path.exists())
 
     def test_maybe_run_maintenance_prunes_when_interval_elapsed(self):
         with mock.patch.object(self.worker_module, "prune_terminal_jobs", return_value={"deleted_jobs": 1}) as prune_jobs:

@@ -1,160 +1,331 @@
-# Vehicle Video Analyzer — FYP Submission Instructions
+# Traffic Video Analyzer
 
-This tool analyzes traffic video or camera streams for billboard advertisers, providing vehicle counts, class breakdown, and actionable ad recommendations (using GPT or local logic). Analysis records are stored in a table for review.
+Traffic Video Analyzer is a web application for turning roadside traffic footage into billboard planning data. Users upload a video or submit a supported camera stream, then the system detects vehicles, tracks them, classifies them, summarizes the traffic mix, and returns advertising-oriented recommendations.
 
----
+The current implementation has three runtime processes:
 
-## 1. Project Directories
-Open command prompt and go to the project root (Traffic Video Analyzer)
-```
-cd <path/to/Traffic Video Analyzer>
-```
-
-Backend code is now organized under the `backend/` folder, while `app.py`, `worker.py`, `analysis.py`, and `pipeline.py` remain thin compatibility entrypoints.
-The heavy inference code lives in `backend/inference/`.
-
-## 2. Backend Setup
-
-1. (Recommended/optional) Create a virtual environment:
-   ```
-   python -m venv venv
-   # Activate (Windows): venv\Scripts\activate
-   # Activate (Linux/Mac): source venv/bin/activate
-   ```
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Set up environment variable for OpenAI (if using GPT):
-   - add your OpenAI API key into .env file.
-   - If not available, leave blank (local analysis will be used).
+- Vue frontend for uploads, queue monitoring, history, job detail, and results review
+- Flask API for validation, job management, history, metrics, and output serving
+- Python worker for video processing, cancellation, retry recovery, and maintenance
 
 ---
 
-## 3. Frontend Setup
+## Quick Start
 
-1. In the vehicle-webapp folder:
-   ```
-   cd vehicle-webapp
-   npm install
-   ```
-2. Run the frontend:
-   ```
-   npm run serve
-   ```
-   - Opens at [http://localhost:8080](http://localhost:8080) by default.
+Open three terminals from the project root unless noted otherwise.
 
----
+### 1. Install Backend Dependencies
 
-## 4. Run the Backend
-
-Open another command prompt, go to the Traffic Video Analyzer directory again, enter:
-
+```powershell
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
 ```
+
+GPT recommendations are optional. Without an API key, the app uses local recommendation logic.
+
+Optional `.env`:
+
+```env
+OPENAI_API_KEY=your_api_key_here
+```
+
+### 2. Install Frontend Dependencies
+
+```powershell
+cd vehicle-webapp
+npm install
+```
+
+### 3. Start The Backend API
+
+```powershell
 python app.py
 ```
 
-- Backend API at [http://localhost:5000](http://localhost:5000)
+Default API URL:
 
-## 4b. Run the Analysis Worker
-
-Open one more command prompt, go to the Traffic Video Analyzer directory again, enter:
-
+```text
+http://localhost:5000
 ```
+
+### 4. Start The Worker
+
+```powershell
 python worker.py
 ```
 
-- This worker picks up queued analysis jobs from the database and processes them in the background.
-- If the worker is not running, uploaded jobs will remain in `queued` status.
-- The worker also runs periodic maintenance, including automatic pruning of old finished jobs and annotated output files.
+The worker may look idle when no jobs are queued. That is normal.
+
+### 5. Start The Frontend
+
+```powershell
+cd vehicle-webapp
+npm run serve
+```
+
+Default frontend URL:
+
+```text
+http://localhost:8080
+```
 
 ---
 
-## 4c. Backend Ops Endpoints
+## Using The App
 
-These endpoints help you monitor and operate the async analysis queue:
+1. Open `http://localhost:8080`.
+2. Choose an input:
+   - upload a supported video file
+   - enter a numeric webcam index such as `0`
+   - enter a direct `rtsp`, `rtsps`, `http`, or `https` camera stream URL
+3. Optionally set the video start date, start time, and analysis name.
+4. Enable `Save annotated video output for review` if you want a playable annotated result file.
+5. Submit the analysis.
+6. Monitor progress in the status panel and recent jobs panel.
+7. Review the results dashboard, recommendations, annotated video, job details, and history.
 
-- `GET /health` returns app health, database status, and a queue snapshot.
-- `GET /analysis-jobs?status=queued&limit=20` lists recent jobs with optional status filtering.
-- `GET /analysis-jobs/stats` returns queue depth, status counts, stale leases, and active worker count.
-- `GET /analysis-jobs/workers` lists active workers, their current jobs, heartbeat times, and lease expiry times.
-- `GET /analysis-jobs/failures?limit=10` lists recent failed jobs with normalized failure reasons.
-- `GET /metrics` returns Prometheus-style metrics for queue depth, worker activity, job durations, failure reasons, history totals, and database availability.
-- `GET /diagnostics` returns runtime configuration, model-file checks, upload/output path checks, and available disk space.
-- `POST /analysis-jobs/<job_id>/retry` re-queues a failed or canceled job for another attempt.
-- `POST /analysis-jobs/<job_id>/cancel` requests cancellation for a queued or running job.
-- `POST /analysis-jobs/prune` removes old completed/failed/canceled jobs and annotated video files based on retention.
-- Backend and worker lifecycle events are emitted as structured JSON log lines to standard logging output.
-- Requests and jobs carry a correlation ID. You can send `X-Correlation-ID` on `POST /analysis-jobs`, and the backend will preserve it on the job record, response header, and worker logs.
-- Error responses now include both `error` and a machine-friendly `error_code`.
+YouTube page URLs such as `youtube.com/watch?...` and `youtu.be/...` are intentionally blocked. OpenCV usually cannot read normal YouTube pages as direct video streams.
 
 ---
 
-## 4d. Useful Backend Environment Variables
+## Architecture
 
-- `TVA_MAX_UPLOAD_BYTES`: maximum upload size in bytes. Default is `536870912` (512 MB).
-- `TVA_ALLOWED_VIDEO_EXTENSIONS`: comma-separated allowed upload extensions. Default is `mp4,mov,avi,mkv,webm,m4v,mpeg,mpg`.
-- `TVA_ALLOWED_CAMERA_SCHEMES`: allowed camera URL schemes. Default is `rtsp,rtsps,http,https`.
-- `TVA_JOB_TIMEOUT_SECONDS`: maximum worker processing time before a job is treated as timed out. Default is `7200`.
-- `TVA_MAINTENANCE_INTERVAL_SECONDS`: how often the worker runs automatic pruning. Default is `300`.
-- `TVA_JOB_RETENTION_HOURS`: how long completed/failed/canceled jobs and annotated outputs are kept before pruning. Default is `168`.
-- `TVA_PIPELINE_RESIZE_DIM`: processing resolution as `width,height` or `widthxheight`. Default is `512,384`.
-- `TVA_PIPELINE_DETECTION_INTERVAL`: run YOLO every Nth frame instead of every frame. Default is `2`.
-- `TVA_PIPELINE_PROGRESS_REPORT_FRAMES`: how many processed frames between pipeline progress reports. Default is `45`.
-- `TVA_PIPELINE_TRACKER_BACKEND`: tracker backend for the pipeline. Default is `centroid`. The heavier alternative is `deepsort`.
-- `TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES`: number of classifier samples to average before committing a track's vehicle class. Default is `3`; use `1` for the old one-shot behavior.
-- `TVA_YOLO_MODEL`: model filename/path shown by diagnostics for YOLO readiness checks. Default is `yolo11n.pt`.
-- `TVA_CLASSIFIER_MODEL`: model filename/path shown by diagnostics for classifier readiness checks. Default is `mobilenetv3_original.keras`.
-- `TVA_DISK_WARN_BYTES`: free-space threshold where diagnostics marks a path as `warning`. Default is 5 GB.
-- `TVA_DISK_CRITICAL_BYTES`: free-space threshold where diagnostics marks a path as `critical`. Default is 1 GB.
-- `TVA_PROGRESS_SAVE_INTERVAL_SECONDS`: minimum seconds between worker progress writes to the database. Default is `2`.
-- `TVA_PROGRESS_SAVE_PERCENT_STEP`: minimum progress-percent jump before forcing a worker progress write. Default is `5`.
-- `TVA_ENABLE_TEST_ROUTES`: set to `true` only in development if you need the debug/test routes.
+```text
+Vue frontend
+  -> Flask API
+  -> SQLite-backed job queue
+  -> Worker process
+  -> YOLO detection
+  -> Tracker
+  -> MobileNetV3 classification
+  -> Local analytics and optional GPT recommendations
+  -> SQLite history and optional annotated video output
+```
+
+Jobs are asynchronous. The frontend creates a job, polls `/analysis-jobs/<job_id>`, and opens the completed result when the worker finishes.
 
 ---
 
-## 5. Usage Steps
+## Project Layout
 
-1. Open [http://localhost:8080](http://localhost:8080) in your browser.
-2. Upload a video or enter a camera/IP stream URL.
-3. (Optional) Enter video start date/time and analysis record name.
-4. Click "Analyze Video" and wait for results.
-5. View: vehicle counts, charts, annotated video, insights & recommendations, and analysis history.
+```text
+.
+|-- app.py                         # Flask API compatibility entrypoint
+|-- worker.py                      # Worker compatibility entrypoint
+|-- analysis.py                    # Legacy import facade
+|-- pipeline.py                    # Legacy import facade
+|-- backend/
+|   |-- core.py                    # Flask, database, paths, environment defaults
+|   |-- models.py                  # SQLAlchemy models and schema compatibility
+|   |-- routes.py                  # API routes and request validation
+|   |-- services.py                # Analysis orchestration and persistence
+|   |-- observability.py           # Structured logs, metrics, diagnostics
+|   |-- worker_runtime.py          # Worker loop, leases, cancellation, maintenance
+|   `-- inference/
+|       |-- pipeline.py            # Video processing pipeline
+|       |-- analysis.py            # Local recommendation logic
+|       |-- trackers.py            # DeepSORT and centroid tracker backends
+|       `-- classification_voting.py
+|-- vehicle-webapp/                # Vue frontend
+|-- tests/                         # Backend and pipeline regression tests
+|-- output/                        # Runtime annotated videos
+|-- uploads/                       # Runtime uploaded videos
+|-- runtime_logs/                  # Optional local run logs
+`-- instance/                      # SQLite database by default
+```
 
----
-
-## 6. Resetting the Database
-
-To clear all previous analysis records:
-
-- Stop the backend (Ctrl+C in terminal)
-- Delete `analysis_history.db` (and any related journal/WAL files)
-- Restart the backend (`python app.py`).
-
----
-
-## 7. Important Notes
-
-- Model files **must** be present or video analysis will fail.
-- OpenAI GPT is optional; local recommendations are always available.
-- Uploads are now validated by extension and size before entering the analysis queue.
-- Camera stream sources must be an integer device index or a direct `rtsp`, `rtsps`, `http`, or `https` stream URL.
-- YouTube page URLs such as `youtube.com/watch?...` or `youtu.be/...` are not supported input sources.
-- The default pipeline is now tuned more for speed: lower processing resolution, detection every 2 frames, reduced worker progress-write frequency, and the lighter `centroid` tracker by default.
-- You can compare tracker backends with `py benchmark_trackers.py --video <path-to-video>` or run a quick synthetic-only comparison with `py benchmark_trackers.py`.
-- `GET /analysis-jobs` now supports `status`, `source_kind`, `analysis_name`, `limit`, and `offset`.
-- `GET /history` still returns a simple array by default for compatibility, but returns a paginated object when query parameters such as `analysis_name`, `limit`, or `offset` are used.
-- All required dependencies are listed in requirements.txt and package.json.
+Generated runtime folders such as `output/`, `uploads/`, `runtime_logs/`, `instance/`, `tests_artifacts/`, and `__pycache__/` should not be treated as source files.
 
 ---
 
-## 8. Contact
+## Current Pipeline Defaults
 
-For any issues or if model files are missing, contact the project author. 
-email : jameskoh0513@gmail.com
+The pipeline is tuned for practical speed on local hardware:
+
+- processing resolution: `512x384`
+- YOLO detection interval: every `2` frames
+- tracker backend: `centroid`
+- classification voting samples: `3`
+- progress database writes: throttled by time and progress delta
+- annotated drawing: only performed when display or annotated output is enabled
+
+The `centroid` tracker is much faster than DeepSORT, but can be less robust in crowded or overlapping scenes. Use the benchmark script when comparing tracker behavior on real footage.
+
+```powershell
+py benchmark_trackers.py
+py benchmark_trackers.py --video segments_segments_1.mp4
+```
+
+To test classification stability across repeated runs:
+
+```powershell
+py validate_pipeline_voting.py --video segments_segments_1.mp4 --runs 2 --vote-samples 3
+```
 
 ---
 
-**Thank you for reviewing this Final Year Project!**
+## API Overview
 
+### Analysis Jobs
 
+- `POST /analysis-jobs`
+- `GET /analysis-jobs`
+- `GET /analysis-jobs/<job_id>`
+- `POST /analysis-jobs/<job_id>/cancel`
+- `POST /analysis-jobs/<job_id>/retry`
+- `POST /analysis-jobs/prune`
+
+`GET /analysis-jobs` supports:
+
+- `status`
+- `source_kind`
+- `analysis_name`
+- `limit`
+- `offset`
+
+### History
+
+- `GET /history`
+
+By default, `/history` returns a compatibility array. When query parameters such as `limit`, `offset`, `analysis_name`, `date_from`, or `date_to` are used, it returns a paginated object.
+
+### Operations
+
+- `GET /health`
+- `GET /metrics`
+- `GET /diagnostics`
+- `GET /analysis-jobs/stats`
+- `GET /analysis-jobs/workers`
+- `GET /analysis-jobs/failures?limit=10`
+
+All standardized API errors include:
+
+```json
+{
+  "error": "Human readable message",
+  "error_code": "machine_readable_code",
+  "status": 400
+}
+```
+
+Requests and jobs support correlation IDs. Send `X-Correlation-ID` on `POST /analysis-jobs` to preserve the same trace value through the response, database job record, and worker logs.
+
+---
+
+## Useful Environment Variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TVA_MAX_UPLOAD_BYTES` | `536870912` | Maximum upload size, 512 MB by default |
+| `TVA_ALLOWED_VIDEO_EXTENSIONS` | `mp4,mov,avi,mkv,webm,m4v,mpeg,mpg` | Allowed upload extensions |
+| `TVA_ALLOWED_CAMERA_SCHEMES` | `rtsp,rtsps,http,https` | Allowed stream URL schemes |
+| `TVA_DATABASE_URI` | SQLite under `instance/` | Database connection |
+| `TVA_UPLOAD_FOLDER` | `uploads` | Runtime upload directory |
+| `TVA_OUTPUT_FOLDER` | `output` | Annotated video directory |
+| `TVA_JOB_TIMEOUT_SECONDS` | `7200` | Worker timeout for long jobs |
+| `TVA_WORKER_LEASE_SECONDS` | `30` | Duration of a worker's ownership lease |
+| `TVA_WORKER_HEARTBEAT_SECONDS` | `10` | Lease refresh interval during model loading and processing |
+| `TVA_MAINTENANCE_INTERVAL_SECONDS` | `300` | Worker maintenance interval |
+| `TVA_JOB_RETENTION_HOURS` | `168` | Retention for terminal jobs and output files |
+| `TVA_PIPELINE_RESIZE_DIM` | `512,384` | Processing resolution |
+| `TVA_PIPELINE_DETECTION_INTERVAL` | `2` | Run YOLO every Nth frame |
+| `TVA_PIPELINE_TRACKER_BACKEND` | `centroid` | `centroid` or `deepsort` |
+| `TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES` | `3` | Number of classifier samples to average per track |
+| `TVA_PROGRESS_SAVE_INTERVAL_SECONDS` | `2` | Minimum seconds between worker progress writes |
+| `TVA_PROGRESS_SAVE_PERCENT_STEP` | `5` | Minimum progress change before forced DB write |
+| `TVA_ANNOTATED_VIDEO_CODECS` | `avc1,H264,mp4v` | Ordered codec preference for annotated output |
+| `TVA_DISABLE_GPT` | unset | Set truthy value to skip GPT calls |
+| `TVA_ENABLE_TEST_ROUTES` | unset | Enable test-only routes in development |
+| `TVA_YOLO_MODEL` | `yolo11n.pt` | Model filename shown by diagnostics |
+| `TVA_CLASSIFIER_MODEL` | `mobilenetv3_original.keras` | Classifier filename shown by diagnostics |
+| `TVA_DISK_WARN_BYTES` | `5368709120` | Warning threshold for free disk space |
+| `TVA_DISK_CRITICAL_BYTES` | `1073741824` | Critical threshold for free disk space |
+
+---
+
+## Practical Smoke Check
+
+After starting the backend, worker, and frontend, run a quick job through the frontend proxy:
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8080/analysis-jobs" `
+  -F "video=@segments_segments_1.mp4;type=video/mp4" `
+  -F "analysis_name=smoke_check" `
+  -F "save_annotated=true" `
+  -F "start_date=2024-07-07" `
+  -F "start_time=09:00"
+```
+
+Then poll the returned job:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8080/analysis-jobs/<job_id>"
+```
+
+Expected result:
+
+- status eventually becomes `completed`
+- result contains vehicle counts and recommendations
+- result contains `annotated_video` when annotated output was requested
+- `http://127.0.0.1:8080/output/<annotated_video>` returns `Content-Type: video/mp4`
+
+---
+
+## Verification Commands
+
+Backend:
+
+```powershell
+py -m unittest tests.test_pipeline_voting tests.test_app_routes tests.test_worker tests.test_trackers -v
+py -m py_compile app.py worker.py backend\core.py backend\models.py backend\observability.py backend\routes.py backend\services.py backend\worker_runtime.py backend\inference\classification_voting.py backend\inference\pipeline.py backend\inference\trackers.py
+```
+
+Frontend:
+
+```powershell
+cd vehicle-webapp
+npm.cmd run lint
+npm.cmd run build
+```
+
+The production build may warn that `chunk-vendors` exceeds the default Vue CLI asset-size recommendation. That warning is expected with Vue and Chart.js in the current app.
+
+---
+
+## Troubleshooting
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common setup and runtime issues, including queued jobs, annotated video playback, worker output, diagnostics, and generated files.
+
+---
+
+## Resetting Local State
+
+To clear saved jobs and history:
+
+1. Stop `python app.py`.
+2. Stop `python worker.py`.
+3. Delete `instance/analysis_history.db` and related SQLite journal/WAL files if present.
+4. Restart the backend and worker.
+
+Uploaded files and annotated outputs live separately in `uploads/` and `output/`.
+
+---
+
+## Research Notebooks
+
+The repository includes notebooks used during experimentation and model development. They are not required to run the web app.
+
+Examples:
+
+- `Vehicle counting and classifcation.ipynb`
+- dataset collection and preprocessing experiments
+- early detection, tracking, and classification experiments
+
+---
+
+## Contact
+
+For project questions or missing model assets, contact:
+
+`jameskoh0513@gmail.com`

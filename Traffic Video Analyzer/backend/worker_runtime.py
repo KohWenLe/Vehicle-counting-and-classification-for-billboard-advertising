@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import socket
+import threading
 import time
 from types import SimpleNamespace
 
@@ -22,6 +23,10 @@ JOB_TIMEOUT_SECONDS = int(os.getenv("TVA_JOB_TIMEOUT_SECONDS", "7200"))
 MAINTENANCE_INTERVAL_SECONDS = int(os.getenv("TVA_MAINTENANCE_INTERVAL_SECONDS", "300"))
 PROGRESS_SAVE_INTERVAL_SECONDS = max(1, int(os.getenv("TVA_PROGRESS_SAVE_INTERVAL_SECONDS", "2")))
 PROGRESS_SAVE_PERCENT_STEP = max(1, int(os.getenv("TVA_PROGRESS_SAVE_PERCENT_STEP", "5")))
+LEASE_HEARTBEAT_INTERVAL_SECONDS = max(
+    0.1,
+    float(os.getenv("TVA_WORKER_HEARTBEAT_SECONDS", str(max(1, LEASE_SECONDS // 3)))),
+)
 _last_maintenance_at = None
 
 
@@ -166,14 +171,14 @@ def _job_should_cancel(job_id, worker_id):
     return _job_stop_reason(job_id, worker_id) is not None
 
 
-def _refresh_job_lease(job_id, worker_id, progress_percent=None, progress_message=None):
+def _refresh_job_lease(job_id, worker_id, progress_percent=None, progress_message=None, force=False):
     job = db.session.get(AnalysisJob, job_id)
     if not job or job.worker_id != worker_id:
-        return
+        return False
     now = _utcnow()
     last_heartbeat = _as_utc(job.heartbeat_at)
     last_progress_percent = job.progress_percent
-    should_persist = False
+    should_persist = force
     next_progress_percent = None
 
     if progress_percent is not None:
@@ -189,7 +194,7 @@ def _refresh_job_lease(job_id, worker_id, progress_percent=None, progress_messag
         should_persist = True
 
     if not should_persist:
-        return
+        return True
 
     if next_progress_percent is not None:
         job.progress_percent = next_progress_percent
@@ -199,6 +204,46 @@ def _refresh_job_lease(job_id, worker_id, progress_percent=None, progress_messag
     job.lease_expires_at = _lease_deadline(now)
     job.updated_at = now
     db.session.commit()
+    return True
+
+
+def _lease_heartbeat_loop(job_id, worker_id, stop_event):
+    while not stop_event.wait(LEASE_HEARTBEAT_INTERVAL_SECONDS):
+        try:
+            with app.app_context():
+                if not _refresh_job_lease(job_id, worker_id, force=True):
+                    return
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+            log_event(
+                "analysis_job_heartbeat_failed",
+                level="warning",
+                job_id=job_id,
+                worker_id=worker_id,
+                error=str(exc),
+            )
+
+
+def _start_job_heartbeat(job_id, worker_id):
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_lease_heartbeat_loop,
+        args=(job_id, worker_id, stop_event),
+        name=f"analysis-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def _stop_job_heartbeat(stop_event, thread):
+    stop_event.set()
+    thread.join(timeout=max(1.0, LEASE_HEARTBEAT_INTERVAL_SECONDS * 2))
+
+
+def _worker_owns_job(job, worker_id):
+    return bool(job and job.worker_id == worker_id)
 
 
 def claim_next_job(worker_id=None):
@@ -285,6 +330,8 @@ def process_job(job_id, worker_id=None):
         if not job:
             return None
 
+        upload_path = job.input_path if job.source_kind == "upload" else None
+        heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, worker_id)
         try:
             result = execute_analysis(
                 video_path=_job_video_source(job),
@@ -296,8 +343,21 @@ def process_job(job_id, worker_id=None):
                 ),
                 should_cancel=lambda: _job_should_cancel(job_id, worker_id),
             )
-            _persist_analysis_record(result, job.analysis_name)
+            _stop_job_heartbeat(heartbeat_stop, heartbeat_thread)
+            db.session.expire_all()
             job = db.session.get(AnalysisJob, job_id)
+            if not _worker_owns_job(job, worker_id):
+                log_event(
+                    "analysis_job_result_discarded",
+                    level="warning",
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    current_worker_id=job.worker_id if job else None,
+                    reason="worker_lost",
+                )
+                return SimpleNamespace(job_id=job_id, worker_id=worker_id)
+
+            _persist_analysis_record(result, job.analysis_name)
             job.status = "completed"
             job.progress_percent = 100
             job.progress_message = "Analysis completed."
@@ -319,7 +379,20 @@ def process_job(job_id, worker_id=None):
                 processing_seconds=_duration_seconds(job.started_at, job.completed_at),
             )
         except Exception as exc:
+            _stop_job_heartbeat(heartbeat_stop, heartbeat_thread)
+            db.session.expire_all()
             job = db.session.get(AnalysisJob, job_id)
+            if not _worker_owns_job(job, worker_id):
+                log_event(
+                    "analysis_job_ownership_lost",
+                    level="warning",
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    current_worker_id=job.worker_id if job else None,
+                    error=str(exc),
+                )
+                return SimpleNamespace(job_id=job_id, worker_id=worker_id)
+
             if exc.__class__.__name__ == "AnalysisCancelled":
                 stop_reason = _job_stop_reason(job_id, worker_id)
                 if stop_reason == "timed_out":
@@ -351,9 +424,15 @@ def process_job(job_id, worker_id=None):
                 processing_seconds=_duration_seconds(job.started_at, job.completed_at),
             )
         finally:
+            _stop_job_heartbeat(heartbeat_stop, heartbeat_thread)
+            db.session.expire_all()
             job = db.session.get(AnalysisJob, job_id)
-            if job and job.source_kind == "upload":
-                _cleanup_uploaded_file(job.input_path)
+            if (
+                upload_path
+                and _worker_owns_job(job, worker_id)
+                and job.status in {"completed", "failed", "canceled"}
+            ):
+                _cleanup_uploaded_file(upload_path)
 
         return SimpleNamespace(job_id=job_id, worker_id=worker_id)
 
