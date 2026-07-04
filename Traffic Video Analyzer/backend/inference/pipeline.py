@@ -11,6 +11,7 @@ from tensorflow.keras.applications.mobilenet_v3 import preprocess_input as keras
 from tensorflow.keras.preprocessing.image import img_to_array
 from ultralytics import YOLO
 from backend.inference.classification_voting import TrackClassificationVotes
+from backend.inference.counting import RoiEntryCounter
 from backend.inference.trackers import build_tracker_backend
 
 
@@ -77,6 +78,27 @@ def _has_gpu():
         return False
 
 
+def _resolve_yolo_device():
+    """YOLO runs on PyTorch, so probe torch (not TensorFlow) for CUDA."""
+    configured = os.getenv("TVA_PIPELINE_DEVICE", "").strip()
+    if configured:
+        return configured
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _is_cuda_device(device):
+    # Ultralytics accepts both "cuda:0" and bare GPU indices like "0" or "0,1".
+    normalized = str(device).strip().lower()
+    return normalized.startswith("cuda") or normalized.split(",")[0].strip().isdigit()
+
+
 def _safe_output_name(name):
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()).strip("._")
     return cleaned or f"analysis_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -116,7 +138,8 @@ def process_video(
     model_path="yolo11n.pt",
     classifier_path="mobilenetv3_original.keras",
     detection_interval=2,
-    confidence_threshold=0.4,
+    confidence_threshold=0.5,
+    nms_iou=0.7,
     min_w=10,
     min_h=10,
     classification_threshold=0.4,
@@ -127,7 +150,8 @@ def process_video(
     display=False,
     time_series_interval_seconds=5,
     progress_report_frames=45,
-    tracker_backend="deepsort",
+    tracker_backend="centroid",
+    tracker_min_hits=2,
     classification_vote_samples=3,
     progress_callback=None,
     should_cancel=None,
@@ -164,6 +188,10 @@ def process_video(
         x0 = int(width / 4)
         x1 = int(width * 3 / 4)
         roi_points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    elif all(0 <= x <= 1 and 0 <= y <= 1 for x, y in roi_points):
+        # Coordinates that all fall in [0, 1] are normalized fractions of the
+        # frame, so the same ROI config works at any resize_dim.
+        roi_points = [(int(x * width), int(y * height)) for x, y in roi_points]
     roi_polygon = np.array(roi_points, dtype=np.int32)
 
     annotated_video = None
@@ -179,27 +207,16 @@ def process_video(
     else:
         out_writer = None
 
-    tracker = build_tracker_backend(tracker_backend, embedder_gpu=_has_gpu())
+    tracker = build_tracker_backend(tracker_backend, embedder_gpu=_has_gpu(), min_hits=tracker_min_hits)
+    yolo_device = _resolve_yolo_device()
+    yolo_half = _is_cuda_device(yolo_device) and os.getenv("TVA_PIPELINE_HALF", "1").strip().lower() in {"1", "true", "yes", "on"}
     classification_votes = TrackClassificationVotes(
         custom_classes=custom_classes,
         threshold=classification_threshold,
         required_samples=classification_vote_samples,
     )
-    track_classes = {}
-    track_memory = {}
-    class_counts = {name: 0 for name in custom_classes}
-    class_counts["Unclassified"] = 0
-
-    def commit_track_classification(track_id):
-        mem = track_memory.get(track_id, {"inside_roi": False, "counted": False})
-        if mem.get("counted"):
-            return track_classes.get(track_id, "Unclassified")
-
-        cls_label = classification_votes.final_label(track_id)
-        track_classes[track_id] = cls_label
-        class_counts[cls_label] += 1
-        track_memory[track_id] = {**mem, "counted": True}
-        return cls_label
+    counter = RoiEntryCounter(custom_classes, classification_votes)
+    class_counts = counter.class_counts
 
     time_series = []
     detection_classes = list(yolo_class_names.keys())
@@ -252,7 +269,15 @@ def process_video(
             frame_resized = cv2.fastNlMeansDenoisingColored(frame_resized, None, 10, 10, 7, 21)
 
         if frame_idx % detection_interval == 0:
-            yolo_results = yolo_model(frame_resized, verbose=False, classes=detection_classes)
+            yolo_results = yolo_model(
+                frame_resized,
+                verbose=False,
+                classes=detection_classes,
+                conf=confidence_threshold,
+                iou=nms_iou,
+                device=yolo_device,
+                half=yolo_half,
+            )
             tracker_inputs = []
             for result in yolo_results:
                 for box in result.boxes:
@@ -278,12 +303,21 @@ def process_video(
                 if not track.is_confirmed():
                     continue
                 track_id = track.track_id
-                mem = track_memory.get(track_id, {"inside_roi": False, "counted": False})
-                if mem["counted"]:
+                if not counter.needs_sample(track_id):
                     continue
                 x1, y1, x2, y2 = map(int, track.to_ltrb())
+                # ROI membership must use the raw centroid so this pre-pass and
+                # the counting loop below always agree for edge-clipped boxes.
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 if cv2.pointPolygonTest(roi_polygon, (cx, cy), False) < 0:
+                    continue
+                # Tracker boxes can drift off-frame; negative indices would
+                # silently crop the wrong region via Python wraparound.
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(width, x2)
+                y2 = min(height, y2)
+                if x2 <= x1 or y2 <= y1:
                     continue
                 crop = frame_resized[y1:y2, x1:x2]
                 if crop.shape[0] < min_h or crop.shape[1] < min_w:
@@ -296,7 +330,9 @@ def process_video(
 
             if batch_inputs:
                 batch = np.stack(batch_inputs, axis=0)
-                batch_probs = classifier_model.predict(batch, verbose=0)
+                # Direct model call skips Model.predict()'s per-call tf.data and
+                # callback setup, which dominates at these tiny batch sizes.
+                batch_probs = np.asarray(classifier_model(batch, training=False))
                 for sample_track_id, probs in zip(batch_track_ids, batch_probs):
                     frame_probs[sample_track_id] = probs
 
@@ -307,30 +343,14 @@ def process_video(
             x1, y1, x2, y2 = map(int, track.to_ltrb())
             track_id = track.track_id
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-            mem = track_memory.get(track_id, {"inside_roi": False, "counted": False})
-            was_inside = mem["inside_roi"]
-            counted = mem["counted"]
             now_inside = cv2.pointPolygonTest(roi_polygon, (cx, cy), False) >= 0
 
-            if now_inside and not counted:
-                mem["classification_started"] = True
-
-            if now_inside and not counted and frame_idx % detection_interval == 0:
-                if track_id in frame_probs:
-                    classification_votes.add_sample(track_id, frame_probs[track_id])
-
-                if classification_votes.is_ready(track_id):
-                    cls_label = commit_track_classification(track_id)
-                    counted = True
-                else:
-                    cls_label = track_classes.get(track_id, "Pending")
-            elif was_inside and not now_inside and not counted and mem.get("classification_started"):
-                cls_label = commit_track_classification(track_id)
-                counted = True
-            else:
-                cls_label = track_classes.get(track_id, "Pending" if now_inside and not counted else "Unclassified")
-
-            track_memory[track_id] = {**mem, "inside_roi": now_inside, "counted": counted}
+            cls_label = counter.observe(
+                track_id,
+                now_inside,
+                frame_idx % detection_interval == 0,
+                probabilities=frame_probs.get(track_id),
+            )
 
             if should_draw_annotations:
                 color = (0, 255, 0)
@@ -379,9 +399,7 @@ def process_video(
     if out_writer:
         out_writer.release()
 
-    for track_id, mem in list(track_memory.items()):
-        if not mem.get("counted") and mem.get("classification_started"):
-            commit_track_classification(track_id)
+    counter.finalize()
 
     if final_snapshot:
         final_snapshot = {**final_snapshot, **class_counts.copy()}

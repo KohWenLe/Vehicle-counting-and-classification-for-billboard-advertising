@@ -54,6 +54,37 @@ def _int_env(name, default):
         return default
 
 
+def _float_env(name, default):
+    raw_value = os.getenv(name)
+    if raw_value in {None, ""}:
+        return default
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_roi_points(raw_value):
+    """Parse "x,y;x,y;..." polygon points as fractions of frame width/height."""
+    if not raw_value or not raw_value.strip():
+        return None
+    points = []
+    for chunk in raw_value.split(";"):
+        if not chunk.strip():
+            continue
+        parts = [part.strip() for part in chunk.split(",") if part.strip()]
+        if len(parts) != 2:
+            return None
+        try:
+            x, y = float(parts[0]), float(parts[1])
+        except ValueError:
+            return None
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            return None
+        points.append((x, y))
+    return points if len(points) >= 3 else None
+
+
 def _parse_resize_dim(raw_value, default=(512, 384)):
     if raw_value in {None, ""}:
         return default
@@ -88,6 +119,19 @@ DEFAULT_PIPELINE_DETECTION_INTERVAL = max(1, _int_env("TVA_PIPELINE_DETECTION_IN
 DEFAULT_PIPELINE_PROGRESS_REPORT_FRAMES = max(1, _int_env("TVA_PIPELINE_PROGRESS_REPORT_FRAMES", 45))
 DEFAULT_PIPELINE_TRACKER_BACKEND = os.getenv("TVA_PIPELINE_TRACKER_BACKEND", "centroid").strip().lower() or "centroid"
 DEFAULT_PIPELINE_CLASSIFICATION_VOTE_SAMPLES = max(1, _int_env("TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES", 3))
+# 0.5 is the value the original methodology report specifies and evaluated with.
+DEFAULT_PIPELINE_CONFIDENCE_THRESHOLD = min(1.0, max(0.0, _float_env("TVA_PIPELINE_CONFIDENCE_THRESHOLD", 0.5)))
+DEFAULT_PIPELINE_NMS_IOU = min(1.0, max(0.0, _float_env("TVA_PIPELINE_NMS_IOU", 0.7)))
+DEFAULT_PIPELINE_CLASSIFICATION_THRESHOLD = min(1.0, max(0.0, _float_env("TVA_PIPELINE_CLASSIFICATION_THRESHOLD", 0.4)))
+DEFAULT_PIPELINE_MIN_CROP = max(1, _int_env("TVA_PIPELINE_MIN_CROP", 10))
+_RAW_ROI_POINTS = os.getenv("TVA_PIPELINE_ROI_POINTS")
+DEFAULT_PIPELINE_ROI_POINTS = _parse_roi_points(_RAW_ROI_POINTS)
+if _RAW_ROI_POINTS and _RAW_ROI_POINTS.strip() and DEFAULT_PIPELINE_ROI_POINTS is None:
+    print(f"Warning: invalid TVA_PIPELINE_ROI_POINTS {_RAW_ROI_POINTS!r}; falling back to the default center ROI.")
+DEFAULT_PIPELINE_MODEL_PATH = os.getenv("TVA_PIPELINE_MODEL_PATH", "yolo11n.pt").strip() or "yolo11n.pt"
+DEFAULT_PIPELINE_CLASSIFIER_PATH = os.getenv("TVA_PIPELINE_CLASSIFIER_PATH", "mobilenetv3_original.keras").strip() or "mobilenetv3_original.keras"
+# Mirrors the DeepSORT n_init=2 the original report validated counting with.
+DEFAULT_PIPELINE_TRACKER_MIN_HITS = max(1, _int_env("TVA_PIPELINE_TRACKER_MIN_HITS", 2))
 
 INSTANCE_DIR = _resolve_path("TVA_INSTANCE_FOLDER", "instance")
 UPLOAD_FOLDER = _resolve_path("TVA_UPLOAD_FOLDER", "uploads")
