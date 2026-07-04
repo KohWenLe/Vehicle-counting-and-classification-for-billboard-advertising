@@ -8,6 +8,7 @@ opencv-python==4.10.0.84
 
 ultralytics==8.3.53
 deep-sort-realtime==1.3.2
+lapx==0.9.4  # linear assignment for ultralytics ByteTrack/BoT-SORT tracking
 
 tensorflow==2.19.0
 

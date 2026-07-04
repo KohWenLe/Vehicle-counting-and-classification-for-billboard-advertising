@@ -12,7 +12,10 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from ultralytics import YOLO
 from backend.inference.classification_voting import TrackClassificationVotes
 from backend.inference.counting import RoiEntryCounter
-from backend.inference.trackers import build_tracker_backend
+from backend.inference.trackers import TrackerTrack, build_tracker_backend
+
+
+ULTRALYTICS_TRACKERS = {"bytetrack", "botsort"}
 
 
 _MODEL_CACHE = {}
@@ -48,11 +51,15 @@ def load_classifier_with_architecture(classifier_path):
     return model
 
 
-def _get_cached_models(model_path, classifier_path):
+def _get_cached_models(model_path, classifier_path, track_variant=False):
+    # model.track() permanently registers tracking callbacks on a YOLO
+    # instance, which would contaminate plain detection calls made later by
+    # other jobs in this process — so tracking mode gets its own cached model.
+    yolo_key = "yolo_track" if track_variant else "yolo"
     with _MODEL_LOCK:
-        if _MODEL_CACHE.get("yolo_path") != model_path:
-            _MODEL_CACHE["yolo"] = YOLO(model_path)
-            _MODEL_CACHE["yolo_path"] = model_path
+        if _MODEL_CACHE.get(f"{yolo_key}_path") != model_path:
+            _MODEL_CACHE[yolo_key] = YOLO(model_path)
+            _MODEL_CACHE[f"{yolo_key}_path"] = model_path
 
         if _MODEL_CACHE.get("classifier_path") != classifier_path:
             try:
@@ -68,7 +75,7 @@ def _get_cached_models(model_path, classifier_path):
             _MODEL_CACHE["classifier"] = classifier_model
             _MODEL_CACHE["classifier_path"] = classifier_path
 
-        return _MODEL_CACHE["yolo"], _MODEL_CACHE["classifier"]
+        return _MODEL_CACHE[yolo_key], _MODEL_CACHE["classifier"]
 
 
 def _has_gpu():
@@ -97,6 +104,51 @@ def _is_cuda_device(device):
     # Ultralytics accepts both "cuda:0" and bare GPU indices like "0" or "0,1".
     normalized = str(device).strip().lower()
     return normalized.startswith("cuda") or normalized.split(",")[0].strip().isdigit()
+
+
+def _build_roi_polygon(roi_points, width, height):
+    if roi_points is None:
+        y0, y1 = int(height / 4), int(height * 3 / 4)
+        x0, x1 = int(width / 4), int(width * 3 / 4)
+        roi_points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    elif all(0 <= x <= 1 and 0 <= y <= 1 for x, y in roi_points):
+        # Coordinates that all fall in [0, 1] are normalized fractions of the
+        # frame, so the same ROI config works at any input resolution.
+        roi_points = [(int(x * width), int(y * height)) for x, y in roi_points]
+    return np.array(roi_points, dtype=np.int32)
+
+
+_TRACKER_CLASS_NAMES = {"bytetrack": "BYTETracker", "botsort": "BOTSORT"}
+
+
+def _reset_ultralytics_tracker(yolo_model, tracker_type):
+    """Start each video with fresh tracker state on the cached model.
+
+    Same backend: reset() the existing instances in place. Deleting them
+    instead would make model.track re-register its callbacks (it registers
+    whenever predictor.trackers is missing), and duplicated callbacks update
+    the tracker twice per frame, destroying association.
+
+    Different backend requested: the persisted instances pin the tracker TYPE
+    (the yaml is only read at creation), so drop them AND strip the old
+    tracking callbacks so the re-registration cannot duplicate.
+    """
+    predictor = getattr(yolo_model, "predictor", None)
+    trackers = getattr(predictor, "trackers", None)
+    if not trackers:
+        return
+    expected_class = _TRACKER_CLASS_NAMES.get(tracker_type)
+    if all(type(tracker).__name__ == expected_class for tracker in trackers):
+        for tracker in trackers:
+            tracker.reset()
+        return
+    del predictor.trackers
+    for event in ("on_predict_start", "on_predict_postprocess_end"):
+        yolo_model.callbacks[event] = [
+            callback
+            for callback in yolo_model.callbacks[event]
+            if getattr(getattr(callback, "func", callback), "__module__", "") != "ultralytics.trackers.track"
+        ]
 
 
 def _safe_output_name(name):
@@ -138,7 +190,9 @@ def process_video(
     model_path="yolo11n.pt",
     classifier_path="mobilenetv3_original.keras",
     detection_interval=2,
+    detection_imgsz=640,
     confidence_threshold=0.5,
+    tracker_feed_conf=0.5,
     nms_iou=0.7,
     min_w=10,
     min_h=10,
@@ -150,7 +204,7 @@ def process_video(
     display=False,
     time_series_interval_seconds=5,
     progress_report_frames=45,
-    tracker_backend="centroid",
+    tracker_backend="bytetrack",
     tracker_min_hits=2,
     classification_vote_samples=3,
     progress_callback=None,
@@ -166,7 +220,11 @@ def process_video(
             "Motorcycle",
         ]
 
-    yolo_model, classifier_model = _get_cached_models(model_path, classifier_path)
+    normalized_backend = (tracker_backend or "centroid").strip().lower()
+    use_ultralytics_tracking = normalized_backend in ULTRALYTICS_TRACKERS
+    yolo_model, classifier_model = _get_cached_models(
+        model_path, classifier_path, track_variant=use_ultralytics_tracking
+    )
 
     if start_dt is None:
         start_dt = datetime.datetime.now()
@@ -176,30 +234,34 @@ def process_video(
         raise RuntimeError(f"Cannot open video source {video_path}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width, height = resize_dim
+    # Detection, tracking, ROI, and classifier crops all work in NATIVE frame
+    # coordinates so no pixel information is destroyed before inference.
+    # resize_dim only sets the annotated-output canvas size.
+    out_width, out_height = resize_dim
     detection_interval = max(1, int(detection_interval or 1))
+    detection_imgsz = max(64, int(detection_imgsz or 640))
     progress_report_frames = max(1, int(progress_report_frames or 1))
     classification_vote_samples = max(1, int(classification_vote_samples or 1))
     should_draw_annotations = bool(display or save_annotated)
 
-    if roi_points is None:
-        y0 = int(height / 4)
-        y1 = int(height * 3 / 4)
-        x0 = int(width / 4)
-        x1 = int(width * 3 / 4)
-        roi_points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-    elif all(0 <= x <= 1 and 0 <= y <= 1 for x, y in roi_points):
-        # Coordinates that all fall in [0, 1] are normalized fractions of the
-        # frame, so the same ROI config works at any resize_dim.
-        roi_points = [(int(x * width), int(y * height)) for x, y in roi_points]
-    roi_polygon = np.array(roi_points, dtype=np.int32)
+    native_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    native_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    roi_polygon = None
+    # min_w/min_h were tuned on 512px-wide frames; scale them with the native
+    # width so far-away sub-vehicle blobs stay rejected at higher resolutions.
+    effective_min_w, effective_min_h = min_w, min_h
+    if native_width > 0 and native_height > 0:
+        roi_polygon = _build_roi_polygon(roi_points, native_width, native_height)
+        crop_scale = max(1.0, native_width / 512.0)
+        effective_min_w = max(1, int(min_w * crop_scale))
+        effective_min_h = max(1, int(min_h * crop_scale))
 
     annotated_video = None
     if save_annotated:
         os.makedirs(output_dir, exist_ok=True)
         annotated_video = f"{_safe_output_name(analysis_name)}.mp4"
         output_path = os.path.join(output_dir, annotated_video)
-        out_writer, selected_codec = _open_video_writer(output_path, fps, (width, height))
+        out_writer, selected_codec = _open_video_writer(output_path, fps, (out_width, out_height))
         if out_writer is None:
             annotated_video = None
         else:
@@ -207,7 +269,19 @@ def process_video(
     else:
         out_writer = None
 
-    tracker = build_tracker_backend(tracker_backend, embedder_gpu=_has_gpu(), min_hits=tracker_min_hits)
+    if use_ultralytics_tracking:
+        tracker = None
+        _reset_ultralytics_tracker(yolo_model, normalized_backend)
+    else:
+        # The centroid gate was tuned on 512px-wide frames; scale it so native
+        # resolution does not change the effective association tolerance.
+        match_scale = (native_width / 512.0) if native_width else 1.0
+        tracker = build_tracker_backend(
+            tracker_backend,
+            embedder_gpu=_has_gpu(),
+            min_hits=tracker_min_hits,
+            match_distance=80.0 * max(0.25, match_scale),
+        )
     yolo_device = _resolve_yolo_device()
     yolo_half = _is_cuda_device(yolo_device) and os.getenv("TVA_PIPELINE_HALF", "1").strip().lower() in {"1", "true", "yes", "on"}
     classification_votes = TrackClassificationVotes(
@@ -221,6 +295,7 @@ def process_video(
     time_series = []
     detection_classes = list(yolo_class_names.keys())
     frame_idx = 0
+    tracks = []
     last_recorded_bucket = None
     final_snapshot = None
 
@@ -264,33 +339,79 @@ def process_video(
         except OverflowError:
             real_timestamp = datetime.datetime.now()
 
-        frame_resized = cv2.resize(frame, resize_dim)
+        if roi_polygon is None:
+            # Some stream sources do not report dimensions before decode.
+            native_height, native_width = frame.shape[:2]
+            roi_polygon = _build_roi_polygon(roi_points, native_width, native_height)
+            if tracker is not None and hasattr(tracker, "match_distance"):
+                tracker.match_distance = 80.0 * max(0.25, native_width / 512.0)
+            crop_scale = max(1.0, native_width / 512.0)
+            effective_min_w = max(1, int(min_w * crop_scale))
+            effective_min_h = max(1, int(min_h * crop_scale))
+
         if denoise:
-            frame_resized = cv2.fastNlMeansDenoisingColored(frame_resized, None, 10, 10, 7, 21)
+            # Disabled by default and never enabled by services: NlMeans on a
+            # native HD frame is an order of magnitude slower than it was on
+            # the old 512x384 working frame.
+            frame = cv2.fastNlMeansDenoisingColored(frame, None, 10, 10, 7, 21)
 
         if frame_idx % detection_interval == 0:
-            yolo_results = yolo_model(
-                frame_resized,
-                verbose=False,
-                classes=detection_classes,
-                conf=confidence_threshold,
-                iou=nms_iou,
-                device=yolo_device,
-                half=yolo_half,
-            )
-            tracker_inputs = []
-            for result in yolo_results:
-                for box in result.boxes:
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
-                    if conf < confidence_threshold or cls_id not in yolo_class_names:
+            if use_ultralytics_tracking:
+                yolo_results = yolo_model.track(
+                    frame,
+                    persist=True,
+                    tracker=f"{normalized_backend}.yaml",
+                    imgsz=detection_imgsz,
+                    verbose=False,
+                    classes=detection_classes,
+                    # The tracker needs to see detections below the counting
+                    # threshold to bridge occlusion dips, but a floor that is
+                    # too low floods dense scenes with noise tracks; the
+                    # counting-grade filter re-applies on emitted boxes below.
+                    conf=min(tracker_feed_conf, confidence_threshold),
+                    iou=nms_iou,
+                    device=yolo_device,
+                    half=yolo_half,
+                )
+                tracks = []
+                for result in yolo_results:
+                    if result.boxes is None:
                         continue
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    tracker_inputs.append([[x1, y1, x2 - x1, y2 - y1], conf, cls_id])
-            tracker_inputs.sort(key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3], item[2]))
-            tracks = tracker.update_tracks(tracker_inputs, frame=frame_resized)
-        else:
-            tracks = tracker.update_tracks([], frame=frame_resized)
+                    for box in result.boxes:
+                        if box.id is None:
+                            continue
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        if conf < confidence_threshold or cls_id not in yolo_class_names:
+                            continue
+                        bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+                        tracks.append(TrackerTrack(int(box.id[0]), (bx1, by1, bx2, by2), confirmed=True))
+            else:
+                yolo_results = yolo_model(
+                    frame,
+                    imgsz=detection_imgsz,
+                    verbose=False,
+                    classes=detection_classes,
+                    conf=confidence_threshold,
+                    iou=nms_iou,
+                    device=yolo_device,
+                    half=yolo_half,
+                )
+                tracker_inputs = []
+                for result in yolo_results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        if conf < confidence_threshold or cls_id not in yolo_class_names:
+                            continue
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        tracker_inputs.append([[x1, y1, x2 - x1, y2 - y1], conf, cls_id])
+                tracker_inputs.sort(key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3], item[2]))
+                tracks = tracker.update_tracks(tracker_inputs, frame=frame)
+        elif not use_ultralytics_tracking:
+            tracks = tracker.update_tracks([], frame=frame)
+        # else: ultralytics tracking holds the previous tracks between
+        # detection frames (positions frozen, like the centroid backend).
 
         # Classify all qualifying crops for this detection frame in a single
         # batched forward pass. Running the classifier once per track (batch
@@ -315,12 +436,14 @@ def process_video(
                 # silently crop the wrong region via Python wraparound.
                 x1 = max(0, x1)
                 y1 = max(0, y1)
-                x2 = min(width, x2)
-                y2 = min(height, y2)
+                x2 = min(native_width, x2)
+                y2 = min(native_height, y2)
                 if x2 <= x1 or y2 <= y1:
                     continue
-                crop = frame_resized[y1:y2, x1:x2]
-                if crop.shape[0] < min_h or crop.shape[1] < min_w:
+                # Crop from the native frame so the classifier sees real
+                # pixels, not detail destroyed by a downscaled working frame.
+                crop = frame[y1:y2, x1:x2]
+                if crop.shape[0] < effective_min_h or crop.shape[1] < effective_min_w:
                     continue
                 rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                 small = cv2.resize(rgb, (224, 224))
@@ -335,6 +458,14 @@ def process_video(
                 batch_probs = np.asarray(classifier_model(batch, training=False))
                 for sample_track_id, probs in zip(batch_track_ids, batch_probs):
                     frame_probs[sample_track_id] = probs
+
+        canvas = None
+        if should_draw_annotations:
+            # Draw on a canvas at the output size with scaled coordinates so
+            # text stays crisp instead of being shrunk by a late downscale.
+            canvas = cv2.resize(frame, (out_width, out_height))
+            scale_x = out_width / float(native_width)
+            scale_y = out_height / float(native_height)
 
         for track in tracks:
             if not track.is_confirmed():
@@ -352,11 +483,13 @@ def process_video(
                 probabilities=frame_probs.get(track_id),
             )
 
-            if should_draw_annotations:
+            if canvas is not None:
                 color = (0, 255, 0)
-                cv2.rectangle(frame_resized, (x1, y1), (x2, y2), color, 2)
+                dx1, dy1 = int(x1 * scale_x), int(y1 * scale_y)
+                dx2, dy2 = int(x2 * scale_x), int(y2 * scale_y)
+                cv2.rectangle(canvas, (dx1, dy1), (dx2, dy2), color, 2)
                 label_text = f"ID:{track_id} {cls_label}"
-                cv2.putText(frame_resized, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                cv2.putText(canvas, label_text, (dx1, dy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         bucket_index = int(frame_time_sec // sample_interval)
         snapshot = {
@@ -368,20 +501,21 @@ def process_video(
             last_recorded_bucket = bucket_index
         final_snapshot = snapshot
 
-        if should_draw_annotations:
-            cv2.polylines(frame_resized, [roi_polygon], isClosed=True, color=(0, 255, 255), thickness=2)
+        if canvas is not None:
+            roi_canvas = (roi_polygon * np.array([scale_x, scale_y])).astype(np.int32)
+            cv2.polylines(canvas, [roi_canvas], isClosed=True, color=(0, 255, 255), thickness=2)
             count_text = " | ".join([f"{key}: {value}" for key, value in class_counts.items()])
-            cv2.putText(frame_resized, count_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 2)
+            cv2.putText(canvas, count_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 2)
 
-        if display:
-            cv2.imshow("Processing", frame_resized)
+        if display and canvas is not None:
+            cv2.imshow("Processing", canvas)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 print("[INFO] 'q' pressed, exiting loop.")
                 break
 
-        if out_writer:
-            out_writer.write(frame_resized)
+        if out_writer and canvas is not None:
+            out_writer.write(canvas)
 
         if progress_callback and (frame_idx == 1 or frame_idx - last_reported_frame >= progress_report_frames):
             if total_frames > 0:
@@ -413,4 +547,5 @@ def process_video(
         "counts": class_counts,
         "time_series": time_series,
         "annotated_video": annotated_video,
+        "classification_confidence": counter.confidence_summary(),
     }

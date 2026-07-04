@@ -9,6 +9,7 @@ from backend.core import (
     DEFAULT_PIPELINE_CLASSIFIER_PATH,
     DEFAULT_PIPELINE_CONFIDENCE_THRESHOLD,
     DEFAULT_PIPELINE_DETECTION_INTERVAL,
+    DEFAULT_PIPELINE_IMGSZ,
     DEFAULT_PIPELINE_MIN_CROP,
     DEFAULT_PIPELINE_MODEL_PATH,
     DEFAULT_PIPELINE_NMS_IOU,
@@ -17,6 +18,7 @@ from backend.core import (
     DEFAULT_PIPELINE_ROI_POINTS,
     DEFAULT_PIPELINE_TRACKER_BACKEND,
     DEFAULT_PIPELINE_TRACKER_MIN_HITS,
+    DEFAULT_PIPELINE_TRACK_CONF,
     OUTPUT_FOLDER,
     TERMINAL_JOB_STATUSES,
     _is_truthy,
@@ -35,11 +37,13 @@ def run_video_pipeline(video_path, start_dt, save_annotated, analysis_name, prog
         start_dt=start_dt,
         resize_dim=DEFAULT_PIPELINE_RESIZE_DIM,
         detection_interval=DEFAULT_PIPELINE_DETECTION_INTERVAL,
+        detection_imgsz=DEFAULT_PIPELINE_IMGSZ,
         progress_report_frames=DEFAULT_PIPELINE_PROGRESS_REPORT_FRAMES,
         tracker_backend=DEFAULT_PIPELINE_TRACKER_BACKEND,
         tracker_min_hits=DEFAULT_PIPELINE_TRACKER_MIN_HITS,
         classification_vote_samples=DEFAULT_PIPELINE_CLASSIFICATION_VOTE_SAMPLES,
         confidence_threshold=DEFAULT_PIPELINE_CONFIDENCE_THRESHOLD,
+        tracker_feed_conf=DEFAULT_PIPELINE_TRACK_CONF,
         nms_iou=DEFAULT_PIPELINE_NMS_IOU,
         classification_threshold=DEFAULT_PIPELINE_CLASSIFICATION_THRESHOLD,
         min_w=DEFAULT_PIPELINE_MIN_CROP,
@@ -161,6 +165,24 @@ def execute_analysis(video_path, start_dt, save_annotated, analysis_name, progre
         "recommendations": analysis.get("recommendations", []) if analysis else [],
         "analysis_name": analysis_name,
     }
+    confidence_summary = pipeline_result.get("classification_confidence")
+    if confidence_summary:
+        response["classification_confidence"] = confidence_summary
+        weak_labels = sorted(
+            label
+            for label, payload in confidence_summary.items()
+            if label != "Unclassified"
+            and payload.get("mean_confidence") is not None
+            and payload["mean_confidence"] < 0.55
+        )
+        if weak_labels and isinstance(response["recommendations"], list):
+            response["recommendations"] = [
+                *response["recommendations"],
+                (
+                    f"Note: classification confidence is low for {', '.join(weak_labels)} "
+                    "(mean vote confidence below 0.55). Treat the class mix as indicative rather than exact."
+                ),
+            ]
     if pipeline_result.get("annotated_video"):
         response["annotated_video"] = pipeline_result["annotated_video"]
     if gpt_recommendations:

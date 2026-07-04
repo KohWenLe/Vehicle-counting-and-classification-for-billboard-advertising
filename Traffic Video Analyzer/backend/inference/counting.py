@@ -20,6 +20,7 @@ class RoiEntryCounter:
         self.class_counts = {name: 0 for name in custom_classes}
         self.class_counts.setdefault(unclassified_label, 0)
         self.track_labels = {}
+        self.track_confidences = {}
         self._memory = {}
 
     def needs_sample(self, track_id):
@@ -72,4 +73,29 @@ class RoiEntryCounter:
             self.class_counts[self.unclassified_label] -= 1
             self.class_counts[cls_label] += 1
         self.track_labels[track_id] = cls_label
+        confidence_fn = getattr(self.votes, "final_confidence", None)
+        if confidence_fn:
+            confidence = confidence_fn(track_id)
+            if confidence is not None:
+                self.track_confidences[track_id] = confidence
         return cls_label
+
+    def confidence_summary(self):
+        """Per-label counted-vehicle count and mean vote confidence."""
+        summary = {}
+        for track_id, label in self.track_labels.items():
+            if label == self.PENDING_LABEL:
+                continue
+            entry = summary.setdefault(label, {"count": 0, "_conf_sum": 0.0, "_conf_n": 0})
+            entry["count"] += 1
+            confidence = self.track_confidences.get(track_id)
+            if confidence is not None:
+                entry["_conf_sum"] += confidence
+                entry["_conf_n"] += 1
+        return {
+            label: {
+                "count": entry["count"],
+                "mean_confidence": round(entry["_conf_sum"] / entry["_conf_n"], 4) if entry["_conf_n"] else None,
+            }
+            for label, entry in summary.items()
+        }

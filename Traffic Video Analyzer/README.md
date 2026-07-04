@@ -141,20 +141,19 @@ Generated runtime folders such as `output/`, `uploads/`, `runtime_logs/`, `insta
 
 ## Current Pipeline Defaults
 
-The pipeline is tuned for practical speed on local hardware:
+The pipeline runs inference on native-resolution frames and is tuned from measurements on labeled reference clips:
 
-- processing resolution: `512x384`
+- YOLO inference resolution: `640` (aspect-preserving letterbox from the native frame)
 - YOLO detection interval: every `2` frames
-- tracker backend: `centroid`
-- classification voting samples: `3`
+- tracker backend: `bytetrack` (Kalman-based, fused with detection; measured 94.7% macro counting accuracy vs 88.4% for `centroid` at native resolution)
+- detection confidence: `0.5`; classification voting samples: `3`
+- annotated output canvas: `512x384` (drawing only, does not affect inference)
 - progress database writes: throttled by time and progress delta
-- annotated drawing: only performed when display or annotated output is enabled
 
-The `centroid` tracker is much faster than DeepSORT, but can be less robust in crowded or overlapping scenes. Use the benchmark script when comparing tracker behavior on real footage.
+Use the counting harness when comparing configurations on real footage (ground truth is parsed from `<N>vehicles` in the filename):
 
 ```powershell
-py benchmark_trackers.py
-py benchmark_trackers.py --video segments_segments_1.mp4
+venv\Scripts\python.exe evaluate_counting.py --label my-config --tracker bytetrack --conf 0.5
 ```
 
 To test classification stability across repeated runs:
@@ -228,10 +227,23 @@ Requests and jobs support correlation IDs. Send `X-Correlation-ID` on `POST /ana
 | `TVA_WORKER_HEARTBEAT_SECONDS` | `10` | Lease refresh interval during model loading and processing |
 | `TVA_MAINTENANCE_INTERVAL_SECONDS` | `300` | Worker maintenance interval |
 | `TVA_JOB_RETENTION_HOURS` | `168` | Retention for terminal jobs and output files |
-| `TVA_PIPELINE_RESIZE_DIM` | `512,384` | Processing resolution |
+| `TVA_PIPELINE_RESIZE_DIM` | `512,384` | Annotated output canvas size (inference runs on native frames) |
+| `TVA_PIPELINE_IMGSZ` | `640` | YOLO inference resolution (aspect-preserving letterbox) |
 | `TVA_PIPELINE_DETECTION_INTERVAL` | `2` | Run YOLO every Nth frame |
-| `TVA_PIPELINE_TRACKER_BACKEND` | `centroid` | `centroid` or `deepsort` |
+| `TVA_PIPELINE_TRACKER_BACKEND` | `bytetrack` | `bytetrack`, `botsort`, `centroid`, or `deepsort` |
+| `TVA_PIPELINE_TRACKER_MIN_HITS` | `2` | Detections required before a track can be counted |
+| `TVA_PIPELINE_CONFIDENCE_THRESHOLD` | `0.5` | Detection confidence cutoff (report-validated value) |
+| `TVA_PIPELINE_NMS_IOU` | `0.7` | YOLO non-max-suppression IoU threshold |
+| `TVA_PIPELINE_TRACK_CONF` | `0.5` | Detection floor fed to ByteTrack/BoT-SORT association (lower bridges occlusions, floods dense scenes) |
+| `TVA_PIPELINE_CLASSIFICATION_THRESHOLD` | `0.4` | Minimum mean vote confidence before labeling |
 | `TVA_PIPELINE_CLASSIFICATION_VOTE_SAMPLES` | `3` | Number of classifier samples to average per track |
+| `TVA_PIPELINE_MIN_CROP` | `10` | Minimum crop size in 512px-equivalent pixels (auto-scaled to native) |
+| `TVA_PIPELINE_ROI_POINTS` | unset | Counting ROI polygon as normalized `x,y;x,y;...` fractions |
+| `TVA_PIPELINE_MODEL_PATH` | `yolo11n.pt` | YOLO weights file |
+| `TVA_PIPELINE_CLASSIFIER_PATH` | `mobilenetv3_original.keras` | Classifier weights file |
+| `TVA_PIPELINE_DEVICE` | auto | YOLO device override (e.g. `cuda:0`, `cpu`) |
+| `TVA_PIPELINE_HALF` | `1` | FP16 inference when on CUDA |
+| `TVA_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout for concurrent API/worker writes |
 | `TVA_PROGRESS_SAVE_INTERVAL_SECONDS` | `2` | Minimum seconds between worker progress writes |
 | `TVA_PROGRESS_SAVE_PERCENT_STEP` | `5` | Minimum progress change before forced DB write |
 | `TVA_ANNOTATED_VIDEO_CODECS` | `avc1,H264,mp4v` | Ordered codec preference for annotated output |

@@ -32,3 +32,11 @@ class TrackClassificationVotes:
         if label_confidence >= self.threshold and label_index < len(self.custom_classes):
             return self.custom_classes[label_index]
         return "Unclassified"
+
+    def final_confidence(self, track_id):
+        """Mean-softmax confidence behind final_label; None without samples."""
+        samples = self._samples_by_track.get(track_id, [])
+        if not samples:
+            return None
+        average_probabilities = np.mean(np.stack(samples, axis=0), axis=0)
+        return float(np.max(average_probabilities))
