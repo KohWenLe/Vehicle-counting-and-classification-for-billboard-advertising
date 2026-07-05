@@ -147,7 +147,7 @@ The pipeline runs inference on native-resolution frames and is tuned from measur
 - YOLO detection interval: every `2` frames
 - tracker backend: `bytetrack` (Kalman-based, fused with detection; measured 94.7% macro counting accuracy vs 88.4% for `centroid` at native resolution)
 - detection confidence: `0.5`; classification voting samples: `3`
-- annotated output canvas: `512x384` (drawing only, does not affect inference)
+- annotated output canvas: `1280x720` (drawing only, does not affect inference)
 - progress database writes: throttled by time and progress delta
 
 Use the counting harness when comparing configurations on real footage (ground truth is parsed from `<N>vehicles` in the filename):
@@ -227,7 +227,7 @@ Requests and jobs support correlation IDs. Send `X-Correlation-ID` on `POST /ana
 | `TVA_WORKER_HEARTBEAT_SECONDS` | `10` | Lease refresh interval during model loading and processing |
 | `TVA_MAINTENANCE_INTERVAL_SECONDS` | `300` | Worker maintenance interval |
 | `TVA_JOB_RETENTION_HOURS` | `168` | Retention for terminal jobs and output files |
-| `TVA_PIPELINE_RESIZE_DIM` | `512,384` | Annotated output canvas size (inference runs on native frames) |
+| `TVA_PIPELINE_RESIZE_DIM` | `1280,720` | Annotated output canvas size (inference runs on native frames) |
 | `TVA_PIPELINE_IMGSZ` | `640` | YOLO inference resolution (aspect-preserving letterbox) |
 | `TVA_PIPELINE_DETECTION_INTERVAL` | `2` | Run YOLO every Nth frame |
 | `TVA_PIPELINE_TRACKER_BACKEND` | `bytetrack` | `bytetrack`, `botsort`, `centroid`, or `deepsort` |

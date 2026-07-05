@@ -27,14 +27,14 @@ Tests and verification:
 
 ```powershell
 # Full backend suite (test_classifier_parity needs TF + model weights; it skips cleanly without them)
-py -m unittest tests.test_pipeline_voting tests.test_counting tests.test_app_routes tests.test_worker tests.test_trackers tests.test_classifier_parity -v
+py -m unittest tests.test_pipeline_voting tests.test_counting tests.test_overlay tests.test_app_routes tests.test_worker tests.test_trackers tests.test_classifier_parity -v
 
 # Single test module / case / method
 py -m unittest tests.test_worker -v
 py -m unittest tests.test_worker.SomeTestCase.test_method
 
 # Syntax compile check across backend
-py -m py_compile app.py worker.py backend\core.py backend\models.py backend\observability.py backend\routes.py backend\services.py backend\worker_runtime.py backend\inference\classification_voting.py backend\inference\counting.py backend\inference\pipeline.py backend\inference\trackers.py
+py -m py_compile app.py worker.py backend\core.py backend\models.py backend\observability.py backend\routes.py backend\services.py backend\worker_runtime.py backend\inference\classification_voting.py backend\inference\counting.py backend\inference\overlay.py backend\inference\pipeline.py backend\inference\trackers.py
 
 # Frontend
 cd vehicle-webapp; npm.cmd run lint; npm.cmd run build

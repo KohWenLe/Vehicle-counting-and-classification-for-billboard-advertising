@@ -12,6 +12,7 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from ultralytics import YOLO
 from backend.inference.classification_voting import TrackClassificationVotes
 from backend.inference.counting import RoiEntryCounter
+from backend.inference.overlay import draw_counting_zone, draw_hud, draw_track, draw_watermark
 from backend.inference.trackers import TrackerTrack, build_tracker_backend
 
 
@@ -184,7 +185,7 @@ def _open_video_writer(output_path, fps, frame_size):
 def process_video(
     video_path,
     start_dt=None,
-    resize_dim=(512, 384),
+    resize_dim=(1280, 720),
     denoise=False,
     roi_points=None,
     model_path="yolo11n.pt",
@@ -298,6 +299,9 @@ def process_video(
     tracks = []
     last_recorded_bucket = None
     final_snapshot = None
+    show_track_ids = os.getenv("TVA_ANNOTATE_TRACK_IDS", "").strip().lower() in {"1", "true", "yes", "on"}
+    processing_fps = None
+    last_frame_time = None
 
     max_retries = 10
     retry_count = 0
@@ -328,6 +332,16 @@ def process_video(
 
         retry_count = 0
         frame_idx += 1
+
+        frame_started_at = time.perf_counter()
+        if last_frame_time is not None:
+            frame_delta = frame_started_at - last_frame_time
+            if frame_delta > 0:
+                instant_fps = 1.0 / frame_delta
+                processing_fps = (
+                    instant_fps if processing_fps is None else 0.9 * processing_fps + 0.1 * instant_fps
+                )
+        last_frame_time = frame_started_at
 
         if fps > 0:
             frame_time_sec = frame_idx / fps
@@ -476,7 +490,7 @@ def process_video(
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
             now_inside = cv2.pointPolygonTest(roi_polygon, (cx, cy), False) >= 0
 
-            cls_label = counter.observe(
+            counter.observe(
                 track_id,
                 now_inside,
                 frame_idx % detection_interval == 0,
@@ -484,12 +498,18 @@ def process_video(
             )
 
             if canvas is not None:
-                color = (0, 255, 0)
-                dx1, dy1 = int(x1 * scale_x), int(y1 * scale_y)
-                dx2, dy2 = int(x2 * scale_x), int(y2 * scale_y)
-                cv2.rectangle(canvas, (dx1, dy1), (dx2, dy2), color, 2)
-                label_text = f"ID:{track_id} {cls_label}"
-                cv2.putText(canvas, label_text, (dx1, dy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # Only counted tracks are drawn: pending ones as a thin gray
+                # box, resolved ones in their class color with a label chip.
+                display_label = counter.track_labels.get(track_id)
+                if display_label is not None:
+                    draw_track(
+                        canvas,
+                        (int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y)),
+                        display_label,
+                        confidence=counter.track_confidences.get(track_id),
+                        track_id=track_id,
+                        show_track_id=show_track_ids,
+                    )
 
         bucket_index = int(frame_time_sec // sample_interval)
         snapshot = {
@@ -503,9 +523,9 @@ def process_video(
 
         if canvas is not None:
             roi_canvas = (roi_polygon * np.array([scale_x, scale_y])).astype(np.int32)
-            cv2.polylines(canvas, [roi_canvas], isClosed=True, color=(0, 255, 255), thickness=2)
-            count_text = " | ".join([f"{key}: {value}" for key, value in class_counts.items()])
-            cv2.putText(canvas, count_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 2)
+            draw_counting_zone(canvas, roi_canvas)
+            draw_hud(canvas, class_counts, real_timestamp.strftime("%H:%M:%S"), fps=processing_fps)
+            draw_watermark(canvas)
 
         if display and canvas is not None:
             cv2.imshow("Processing", canvas)

@@ -114,7 +114,9 @@ ALLOWED_CAMERA_URL_SCHEMES = {
     for scheme in os.getenv("TVA_ALLOWED_CAMERA_SCHEMES", "rtsp,rtsps,http,https").split(",")
     if scheme.strip()
 }
-DEFAULT_PIPELINE_RESIZE_DIM = _parse_resize_dim(os.getenv("TVA_PIPELINE_RESIZE_DIM"), default=(512, 384))
+# Annotated-output canvas only (inference runs on native frames); 720p keeps
+# the overlay chips/HUD legible.
+DEFAULT_PIPELINE_RESIZE_DIM = _parse_resize_dim(os.getenv("TVA_PIPELINE_RESIZE_DIM"), default=(1280, 720))
 DEFAULT_PIPELINE_DETECTION_INTERVAL = max(1, _int_env("TVA_PIPELINE_DETECTION_INTERVAL", 2))
 DEFAULT_PIPELINE_PROGRESS_REPORT_FRAMES = max(1, _int_env("TVA_PIPELINE_PROGRESS_REPORT_FRAMES", 45))
 # bytetrack measured 94.7% macro counting accuracy vs centroid's 88.4% at
